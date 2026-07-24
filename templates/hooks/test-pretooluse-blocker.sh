@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
-# flowkit blocker regex tests — run from the plugin root. Substitutes test values
-# for the placeholders, then feeds hook-style JSON via stdin.
+# flowkit blocker regex tests. Two modes:
+#   no argument       — run from the plugin root against the TEMPLATE, with test
+#                       values substituted for the {{...}} placeholders.
+#   $1 = path to script — run against an ALREADY INSTALLED hook (real values
+#                       already substituted at setup-time, e.g. .claude/hooks/pretooluse-blocker.sh
+#                       in the target repo); used as-is, no substitution.
+# Usage: test-pretooluse-blocker.sh [path-to-installed-script]
 set -u
+SCRIPT_ARG="${1:-}"
 TMP=$(mktemp)
-sed -e 's/{{PROTECTED_BRANCHES}}/main|master/' -e 's/{{OVERRIDE_LABEL}}/override-claude-review/' \
-  templates/hooks/pretooluse-blocker.sh > "$TMP"
+if [ -n "$SCRIPT_ARG" ]; then
+  cp "$SCRIPT_ARG" "$TMP"
+else
+  sed -e 's/{{PROTECTED_BRANCHES}}/main|master/' -e 's/{{OVERRIDE_LABEL}}/override-claude-review/' \
+    templates/hooks/pretooluse-blocker.sh > "$TMP"
+fi
 pass=0; fail=0
 run() {
   printf '{"tool_input":{"command":%s}}' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")" \

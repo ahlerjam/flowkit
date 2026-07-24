@@ -29,7 +29,7 @@
         "planner": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
         "builder": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
         "verifier": { "type": "string" },
-        "critic": { "type": "string" },
+        "critic": { "type": "string", "description": "Modell für die Critic-Station. Template-Default ist opus, solange der Codex-Fallback (critic.fallback) aktiv ist — das Claude-Fallback-Review ersetzt den Cross-Vendor-Pass und braucht dafür mehr Modellstärke; mit echtem Codex-Zugang darf sonnet reichen." },
         "escalation": { "type": "string" }
       }
     },
@@ -43,6 +43,6 @@
     "issueLimit": { "type": "integer", "default": 300 },
     "browserProof": { "type": "boolean", "default": false },
     "notify": { "type": "boolean", "default": false },
-    "critic": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "fallback": { "enum": ["claude", "skip"], "description": "Verhalten ohne Codex-Zugang: claude = Same-Family-Ersatz-Review (Fokus Spec-Compliance + Test-Manipulation), skip = Station überspringen. Default: claude" } } }
+    "critic": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "fallback": { "enum": ["claude", "skip"], "default": "claude", "description": "Verhalten ohne Codex-Zugang: claude = Same-Family-Ersatz-Review (Fokus Spec-Compliance + Test-Manipulation), skip = Station überspringen. Default: claude" } } }
   }
 }

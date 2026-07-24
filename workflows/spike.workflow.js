@@ -4,6 +4,8 @@ export const meta = {
   phases: [{ title: 'Spike' }],
 }
 
+if (typeof phase === 'function') phase('Spike')
+
 const befund = {
   parallelTyp: typeof parallel,
   budgetTyp: (typeof budget !== 'undefined' && budget) ? typeof budget.spent : 'undefined',

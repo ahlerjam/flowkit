@@ -24,7 +24,7 @@
     "planner": { "SM": "sonnet", "L": "opus" },
     "builder": { "SM": "sonnet", "L": "opus" },
     "verifier": "sonnet",
-    "critic": "sonnet",
+    "critic": "opus",
     "escalation": "opus"
   },
   "autoReady": { "impulse": "P2", "gapScan": "off" },

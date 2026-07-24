@@ -4,7 +4,8 @@ export const meta = {
   phases: [{ title: 'Implement' }],
 }
 
-const A = typeof args === 'string' ? JSON.parse(args) : (args || {})
+const A = typeof args === 'undefined' ? {} : (typeof args === 'string' ? JSON.parse(args) : (args || {}))
+const LOG = typeof log === 'function' ? log : () => {}
 const C = A.config
 if (!C || !C.repoSlug || !C.commands || !C.commands.test || !C.commands.lint) {
   throw new Error('flowkit: .claude/workflow.config.json fehlt/unvollständig (repoSlug, commands.test, commands.lint sind Pflicht). Kein stiller Default — /flowkit:setup ausführen.')
@@ -20,7 +21,7 @@ for (const sz of ['S', 'M', 'L']) {
 const units0 = Array.isArray(A.units) ? A.units.slice() : []
 const RUNCAP = (C.caps && C.caps.issuesPerRun) || 10
 const units = units0.slice(0, RUNCAP)
-if (units0.length > units.length) log(`flowkit: caps.issuesPerRun=${RUNCAP} — ${units0.length - units.length} Einheit(en) zurückgestellt.`)
+if (units0.length > units.length) LOG(`flowkit: caps.issuesPerRun=${RUNCAP} — ${units0.length - units.length} Einheit(en) zurückgestellt.`)
 
 // Engine-Vertrag (Annahme A0, Task A0): strukturelle Guards statt stiller Fehlfunktion.
 const HAS_PAR = typeof parallel === 'function'
@@ -39,7 +40,7 @@ const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: 'opus' }
 // parallelism 1 einer Einheit zurechenbar — bei >1 enthielte es den Verbrauch aller
 // anderen Worker (Fehlabbrüche + unbrauchbare Messdaten). Deshalb:
 const TOKEN_MODE = HAS_BUDGET ? (PAR === 1 ? 'delta' : 'off') : 'off'
-if (TOKEN_MODE !== 'delta') log(`flowkit: Token-Deckel AUS (${HAS_BUDGET ? 'parallelism>1: globales Delta wäre falsch' : 'Engine ohne budget-API'}) — harte Grenze dieses Laufs: maxFixRounds=${MAXFIX} je Issue. Kalibrier-Läufe mit parallelism 1 fahren.`)
+if (TOKEN_MODE !== 'delta') LOG(`flowkit: Token-Deckel AUS (${HAS_BUDGET ? 'parallelism>1: globales Delta wäre falsch' : 'Engine ohne budget-API'}) — harte Grenze dieses Laufs: maxFixRounds=${MAXFIX} je Issue. Kalibrier-Läufe mit parallelism 1 fahren.`)
 
 const budgetFor = (u) => (C.budgets && C.budgets[u.size]) || { turns: 60, tokens: 500000 }
 const modelFor = (station, u, esc) => {
@@ -113,7 +114,7 @@ Im Zweifel gilt ein AC als verfehlt. Return { pass, unmet }.`
 const fixPrompt = (n, pr, branch, unmet) => `${PRE}FIX-RUNDE für PR #${pr} (Issue #${n}). Verfehlt gemeldet: ${JSON.stringify(unmet)}.
 Skill superpowers:systematic-debugging laden (Ursache verstehen, nicht blind fixen). Eigenen Worktree anlegen: git fetch origin && git worktree add <tmp-pfad> ${branch} — NIE den Haupt-Tree anfassen, NIE checkout -B. Im Worktree: pro Punkt erst der beweisende failing Test, dann der Fix. Lokale Gates: ${gateCmds}. ${PUSH} aus dem Worktree, danach git worktree remove.`
 
-const criticPrompt = (n, pr) => `${PRE}Du bist die CRITIC-Station für PR #${pr} (Issue #${n}). Lade den Skill flowkit:critic (Skill-Tool) und folge ihm exakt — INKLUSIVE Schritt 0 (Verfügbarkeits-Check: ohne Codex-Login und ohne OPENAI_API_KEY greift CONFIG.critic.fallback — Default "claude": du führst das Review selbst durch, eng fokussiert auf Spec-Compliance und Test-Manipulation, Kommentar als Claude-Fallback gekennzeichnet; "skip": Station per PR-Kommentar überspringen und { blockers: [] } liefern. Niemals codex blind aufrufen). Sonst: Cross-Vendor-Review via codex exec über Issue-Body + PR-Diff + AGENTS.md, inkl. Test-Manipulations-Check; Ergebnis als PR-Kommentar, erste Zeile exakt ${MARK.critic}. Return { blockers: [je P0/P1-Finding ein Kurztitel] } — leeres Array wenn keine oder übersprungen.`
+const criticPrompt = (n, pr) => `${PRE}Du bist die CRITIC-Station für PR #${pr} (Issue #${n}). Lade den Skill flowkit:critic (Skill-Tool) und folge ihm exakt — INKLUSIVE Schritt 0 (Verfügbarkeits-Check: ohne Codex-Login und ohne OPENAI_API_KEY greift CONFIG.critic.fallback = ${(C.critic && C.critic.fallback) || 'claude'}: bei "claude" führst du das Review selbst durch, eng fokussiert auf Spec-Compliance und Test-Manipulation, Kommentar als Claude-Fallback gekennzeichnet; bei "skip" Station per PR-Kommentar überspringen und { blockers: [] } liefern. Niemals codex blind aufrufen). Sonst: Cross-Vendor-Review via codex exec über Issue-Body + PR-Diff + AGENTS.md, inkl. Test-Manipulations-Check; Ergebnis als PR-Kommentar, erste Zeile exakt ${MARK.critic}. Return { blockers: [je P0/P1-Finding ein Kurztitel] } — leeres Array wenn keine oder übersprungen.`
 
 const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter Bereich) für PR #${pr} (Issue #${n}) — er läuft VOR dem Merge. Falls ein Security-Skill verfügbar ist (security-review oder ein repo-lokaler Skill laut AGENTS.md), lade ihn und wende ihn auf den PR-Diff an; sonst prüfe selbst fokussiert: Injection (SQL/Shell/Template), AuthZ/AuthN an neuen oder geänderten Endpunkten, Secrets im Diff, unsichere Defaults, Datenverlustpfade. NUR geänderte Zeilen, jedes Finding mit file:line und konkretem Szenario. Ergebnis als PR-Kommentar (gh pr comment ${pr} -R ${SLUG}), erste Zeile exakt: <!-- security-pass:v1 -->. Return { blockers: [je P0/P1 ein Kurztitel] } — leeres Array wenn keine.`
 
@@ -163,6 +164,7 @@ const runUnit = async (u) => {
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
 
   if (C.critic && C.critic.enabled) {
+    if (over()) return budgetStop(`vor Critic (PR #${pr})`)
     let crit = await agent(criticPrompt(n, pr), { label: `critic #${n}`, phase: 'Implement', model: M.critic || 'sonnet', schema: CRITIC_SCHEMA })
     while (crit && crit.blockers && crit.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
@@ -170,10 +172,12 @@ const runUnit = async (u) => {
       await agent(fixPrompt(n, pr, built.branch, crit.blockers), { label: `critic-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       crit = await agent(criticPrompt(n, pr), { label: `critic+${fixRounds} #${n}`, phase: 'Implement', model: M.critic || 'sonnet', schema: CRITIC_SCHEMA })
     }
+    if (!crit) throw new Error('GATE: Critic-Station ohne Ergebnis (Agent ausgefallen)')
     if (crit && crit.blockers && crit.blockers.length) throw new Error(`GATE: Critic-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(crit.blockers)}`)
   }
 
   if (PROT.includes(u.area)) {
+    if (over()) return budgetStop(`vor Security (PR #${pr})`)
     let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: CRITIC_SCHEMA })
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
@@ -181,11 +185,12 @@ const runUnit = async (u) => {
       await agent(fixPrompt(n, pr, built.branch, sec.blockers), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: CRITIC_SCHEMA })
     }
+    if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
     if (sec && sec.blockers && sec.blockers.length) throw new Error(`GATE: Security-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(sec.blockers)}`)
   }
   if (over()) return budgetStop(`vor Gate (PR #${pr})`)
 
-  const gate = await withMergeLock(() => agent(gatePrompt(n, pr, built.branch, u, Math.max(1, MAXFIX - fixRounds)), { label: `gate #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
+  const gate = await withMergeLock(() => agent(gatePrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
   return { pr, fixRounds, postMergeRed: gate.postMergeGreen === false, note: gate.note || '' }
 }
@@ -200,6 +205,7 @@ const withMergeLock = (fn) => {
 const queue = units.slice()
 const failures = {}
 const done = []
+const failed = []
 let stopped = null
 const inFlightAreas = new Set()
 
@@ -232,24 +238,25 @@ const worker = async () => {
       const res = await runUnit(u)
       const tokens = TOKEN_MODE === 'delta' ? budget.spent() - start : null
       done.push(Object.assign({ issue: u.n, tokens, size: u.size }, res))
-      log(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
+      LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
       if (res.postMergeRed) {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
-        log(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
+        LOG(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
       }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)
       if (msg.startsWith('GATE:')) {
         await needsHumanStop(u, msg)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
-        log(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
+        LOG(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
       } else {
         failures[u.n] = (failures[u.n] || 0) + 1
-        log(`#${u.n} technischer Fehler (Versuch ${failures[u.n]}): ${msg}`)
+        LOG(`#${u.n} technischer Fehler (Versuch ${failures[u.n]}): ${msg}`)
         await cleanupUnit(u, msg)
         if (failures[u.n] >= 2) {
           stopped = { issue: u.n, reason: msg }
-          log(`STOP an #${u.n}: zweiter technischer Fehler. Operator entscheidet.`)
+          failed.push(u.n)
+          LOG(`STOP an #${u.n}: zweiter technischer Fehler. Operator entscheidet.`)
         } else {
           queue.push(u)
         }
@@ -266,14 +273,14 @@ phase('Implement')
 // serverseitiges Gate + Protection ist Auto-Merge nicht zulässig).
 const pre = await agent(`${PRE}PRE-FLIGHT (read-only, KEINE Mutation): 1. Haupt-Tree sauber? git status --porcelain muss leer sein UND git branch --show-current muss ${BRANCH} sein. 2. gh auth status ok? 3. Branch-Protection aktiv? gh api repos/${SLUG}/branches/${BRANCH}/protection (GET ist erlaubt) muss Status 200 liefern und required_status_checks enthalten${C.mergeCheck ? ` (erwartet u. a. "${C.mergeCheck}")` : ''} — 404 heißt: keine Protection, Auto-Merge nicht zulässig. Return { clean, note } — clean nur, wenn alle drei Punkte erfüllt.`, { label: 'preflight', phase: 'Implement', model: 'haiku', schema: PREFLIGHT_SCHEMA })
 if (!pre || pre.clean !== true) {
-  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), parallelism: PAR, tokenMode: TOKEN_MODE }
+  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), failed: [], parallelism: PAR, tokenMode: TOKEN_MODE }
 }
 
-if (!queue.length) log('flowkit: keine units übergeben — nichts zu tun.')
+if (!queue.length) LOG('flowkit: keine units übergeben — nichts zu tun.')
 if (PAR > 1) {
   await parallel(Array.from({ length: Math.min(PAR, Math.max(1, queue.length)) }, () => () => worker()))
 } else {
   await worker()
 }
 
-return { done, stopped, remaining: queue.map((u) => u.n), parallelism: PAR, tokenMode: TOKEN_MODE }
+return { done, stopped, remaining: queue.map((u) => u.n), failed, parallelism: PAR, tokenMode: TOKEN_MODE }

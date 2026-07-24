@@ -1,13 +1,14 @@
 ---
 name: critic
-description: Use when a pull request needs the cross-vendor critic pass (Codex reviews the diff against the issue spec and AGENTS.md, including test-manipulation checks) — normally invoked by the implement runner, usable standalone with a PR number.
+description: Use when a pull request needs the cross-vendor critic pass — Codex reviews the diff against the issue spec and AGENTS.md, including test-manipulation checks; falls back to a same-family Claude review (or a skip) when Codex isn't configured — normally invoked by the implement runner, usable standalone with a PR number.
 ---
 
 # flowkit:critic — Cross-Vendor-Zweitgutachter
 
-> Voraussetzung: OpenAI Codex CLI, Login-Befund siehe flowkit `docs/verifikation/annahmen.md`
-> (A1). Läuft A1 auf „nein": vor dem Aufruf `OPENAI_API_KEY` exportieren; der Aufruf
-> selbst ist identisch. CONFIG = `.claude/workflow.config.json`.
+> Codex ist OPTIONAL, kein hartes Voraussetzungs-Gate: ohne `codex login` und ohne
+> `OPENAI_API_KEY` greift automatisch `CONFIG.critic.fallback` (Default `"claude"` —
+> Same-Family-Ersatz-Review durch dich selbst, siehe Schritt 0). Ist Codex
+> vorhanden, läuft der echte Cross-Vendor-Pass. CONFIG = `.claude/workflow.config.json`.
 
 ## Schritt 0 — Verfügbarkeits-Check (Auto-Skip statt Fehlversuch)
 
@@ -24,8 +25,9 @@ Schritt 2 wörtlich auf dich selbst anwenden — aber mit ENGEM Fokus, um das
 pr-deep-review-Gate nicht zu doppeln: NUR (a) Spec-Compliance (verletzt der Diff
 ein Akzeptanzkriterium oder AGENTS.md-Konventionen?) und (b) die PFLICHTPRÜFUNG
 Test-Manipulation. KEINE Stil-, Struktur- oder Performance-Findings (dafür ist
-pr-deep-review zuständig). Severity-Regeln und Ausgabeformat wie in Schritt 3-4;
-der PR-Kommentar beginnt mit dem Marker und kennzeichnet in der zweiten Zeile:
+pr-deep-review zuständig). Severity-Regeln wie in Schritt 2, Ausgabeformat wie
+in Schritt 4; der PR-Kommentar beginnt mit dem Marker und kennzeichnet in der
+zweiten Zeile:
 `**Claude-Fallback** (same-family — Cross-Vendor-Effekt entfällt, bis codex
 verfügbar ist).`
 
@@ -99,10 +101,16 @@ Test-Manipulation.
        print(f"{len(data.get('findings', []))} findings")
        PY
 
-   Schlägt `codex exec` selbst fehl (Binary fehlt, Auth): NICHT stumm weiter —
-   Kommentar posten „Critic-Station übersprungen: <Grund>" und { blockers: [] }
-   mit note zurückgeben; der Runner behandelt das nicht als grün geprüft, sondern
-   der Operator sieht es im PR.
+   Schlägt `codex exec` selbst zur LAUFZEIT fehl (Binary fehlt, Auth-Fehler,
+   Quota überschritten — Login/Key aus Schritt 0 waren also vorhanden, aber der
+   Aufruf selbst bricht ab): NICHT stumm weiter und NICHT hart überspringen,
+   sondern denselben Fallback wie in Schritt 0 anwenden (`CONFIG.critic.fallback`):
+   bei `"claude"` das Review jetzt SELBST durchführen (Vorgehen wie in Schritt 0
+   beschrieben, PR-Kommentar mit Claude-Fallback-Kennzeichnung, Grund ergänzt um
+   den konkreten Laufzeitfehler); bei `"skip"` den Skip-Kommentar aus Schritt 0
+   posten (Grund ergänzt um den Laufzeitfehler) und `{ blockers: [] }` mit note
+   zurückgeben. Der Runner behandelt das nicht als grün geprüft, sondern der
+   Operator sieht Grund und Modus im PR.
 
 4. Als PR-Kommentar posten, erste Zeile exakt der CONFIG.markers.critic-Marker
    (Default `<!-- critic:v1 -->`), danach je Finding eine Zeile

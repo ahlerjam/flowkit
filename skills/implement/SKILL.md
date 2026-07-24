@@ -9,7 +9,9 @@ description: Use when a defined scope of this repository should be built autonom
 > Repo-Spezifika: `.claude/workflow.config.json` (CONFIG — zuerst laden und gegen
 > das Schema des Plugins plausibilisieren; fehlt sie oder fehlt CONFIG.repoSlug:
 > STOPP mit Hinweis auf /flowkit:setup. Keine stillen Defaults für repoSlug).
-> Orchestrierung: `workflows/implement.workflow.js` im flowkit-Plugin.
+> Orchestrierung: `${CLAUDE_PLUGIN_ROOT}/workflows/implement.workflow.js`
+> (`CLAUDE_PLUGIN_ROOT` = von Claude Code gesetzte Env-Var mit dem absoluten
+> Pfad zur Wurzel dieses Plugins).
 
 ## Zusage an den Operator
 
@@ -20,7 +22,23 @@ bricht sauber ab statt weiterzubrennen.
 
 ## Scope auflösen (im Hauptkontext, via gh; REPO_SLUG=CONFIG.repoSlug)
 
-- `epic <N>` → offene Sub-Issues des Epic (`gh sub-issue list <N> -R "$REPO_SLUG" --json number,state | jq '.subIssues[] | select(.state=="OPEN") | .number'`).
+- `epic <N>` → offene Sub-Issues des Epic, gefiltert um `CONFIG.excludeLabels`
+  (gleiche Filterlogik wie bei `next <N>` unten, angewandt auf `gh sub-issue list`):
+
+      CFG=.claude/workflow.config.json
+      EXCL_JSON=$(jq -c '.excludeLabels // []' "$CFG")
+      gh sub-issue list <N> -R "$REPO_SLUG" --json number,state,labels \
+      | jq --argjson excl "$EXCL_JSON" '
+          .subIssues[] | select(.state=="OPEN")
+          | select((.labels | map(.name)) as $l
+              | ([$l[] | select(. as $x | $excl | index($x))] | length) == 0)
+          | .number'
+
+  Getestet gegen Beispiel-JSON (`{"subIssues":[{"number":101,"state":"OPEN",
+  "labels":[{"name":"area/backend"}]},{"number":102,"state":"OPEN","labels":
+  [{"name":"type/operator"}]},{"number":104,"state":"OPEN","labels":
+  [{"name":"type/epic"}]}]}` mit `excl=["type/operator","type/epic"]` → liefert
+  nur `101`).
 - `milestone "<Name>"` → offene Issues des Milestones.
 - `issues <N,N,...>` → genau diese, in dieser Reihenfolge.
 - `next <N>` → die nächsten N offenen `agent-ready`-Issues nach Priorität. Lauffähiges
@@ -53,11 +71,9 @@ annehmen und im Issue nachlabeln) · `area` = erstes `area/*`-Label.
 
 ## Start
 
-    Workflow({ scriptPath: "<Pfad zum flowkit-Plugin>/workflows/implement.workflow.js",
+    Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/implement.workflow.js",
                args: { config: <CONFIG als Objekt>,
                        units: [{ n: 123, lane: "full", size: "M", area: "backend" }, ...] } })
-
-Den Plugin-Pfad ermittelst du über die Skill-Basis dieses Skills (../../workflows/).
 
 ## Stationen pro Issue (führt der Workflow aus)
 

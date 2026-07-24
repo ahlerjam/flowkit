@@ -27,14 +27,15 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    NICHT selbst versuchen (Plugin-Installation ist Nutzer-Ebene); Setup läuft
    vollständig weiter — flowkit funktioniert ohne diese Plugins, nur schwächer.
 1. **Vorbedingungen:** `AGENTS.md` existiert im Root (sonst aus dem Plugin-Template
-   `templates/AGENTS.md.template` interaktiv erzeugen — Platzhalter mit dem Operator
-   klären, EIN AskUserQuestion-Block). `gh auth status` ok. REPO_SLUG via
+   `${CLAUDE_PLUGIN_ROOT}/templates/AGENTS.md.template` interaktiv erzeugen — Platzhalter
+   mit dem Operator klären, EIN AskUserQuestion-Block). `gh auth status` ok. REPO_SLUG via
    `gh repo view --json nameWithOwner -q .nameWithOwner`.
-2. **Config:** `.claude/workflow.config.json` aus `templates/workflow.config.json.template`
+2. **Config:** `.claude/workflow.config.json` aus
+   `${CLAUDE_PLUGIN_ROOT}/templates/workflow.config.json.template`
    anlegen (existiert sie: nur fehlende Felder ergänzen). Werte aus AGENTS.md/README
    ableiten, Unklares im selben AskUserQuestion-Block wie oben klären. Gegen
-   `templates/workflow.config.schema.json` validieren (python3 + json, ohne
-   Fremdpakete: Pflichtfelder und Typen manuell prüfen).
+   `${CLAUDE_PLUGIN_ROOT}/templates/workflow.config.schema.json` validieren (python3 + json,
+   ohne Fremdpakete: Pflichtfelder und Typen manuell prüfen).
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
    budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6) sowie fehlende
@@ -45,16 +46,17 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Status-Spalten (Triage / Ready / In Arbeit / PR offen / Fertig) einmalig von
    Hand in der Projects-UI angelegt werden müssen (die Spalten-Anlage per CLI
    bräuchte GraphQL-Mutationen — rote Linie). Kein Runner-Board-Sync in Stufe 1.
-5. **Hooks + Settings:** `templates/hooks/*.sh` nach `.claude/hooks/` kopieren,
-   `chmod +x`. `templates/settings.json.template` nach `.claude/settings.json`
-   (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen). Platzhalter
-   ersetzen: {{PROTECTED_BRANCHES}} aus CONFIG.defaultBranch (+ master), {{OVERRIDE_LABEL}}
-   aus CONFIG.overrideLabel, {{STACK_ALLOW}} = Allow-Zeilen für die Kommandopräfixe
-   aus CONFIG.commands/extraGates (z. B. "Bash(uv run *)"), {{FORMAT_CMD_PY}} = Format-
-   Kommando des Repos oder `true` wenn keins. Danach validieren:
+5. **Hooks + Settings:** `${CLAUDE_PLUGIN_ROOT}/templates/hooks/*.sh` nach `.claude/hooks/`
+   kopieren, `chmod +x`. `${CLAUDE_PLUGIN_ROOT}/templates/settings.json.template` nach
+   `.claude/settings.json` (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen).
+   Platzhalter ersetzen: {{PROTECTED_BRANCHES}} aus CONFIG.defaultBranch (+ master),
+   {{OVERRIDE_LABEL}} aus CONFIG.overrideLabel, {{STACK_ALLOW}} = Allow-Zeilen für die
+   Kommandopräfixe aus CONFIG.commands/extraGates (z. B. "Bash(uv run *)"), {{FORMAT_CMD_PY}}
+   = Format-Kommando des Repos oder `true` wenn keins. Danach validieren:
    `python3 -m json.tool .claude/settings.json >/dev/null` (das Template selbst ist
    wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein)
-   und `bash templates/hooks/test-pretooluse-blocker.sh` gegen die installierte Fassung.
+   und gegen die INSTALLIERTE Fassung testen:
+   `bash ${CLAUDE_PLUGIN_ROOT}/templates/hooks/test-pretooluse-blocker.sh .claude/hooks/pretooluse-blocker.sh`.
 5b. **Branch-Protection (Merge-Voraussetzung, Spec §6):** read-only prüfen:
    `gh api repos/$REPO_SLUG/branches/<defaultBranch>/protection` (GET ist erlaubt).
    Bei 404: dem Operator die Einrichtung anleiten (GitHub → Settings → Branches →
@@ -62,16 +64,18 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    require PR before merging) — gh-api-Mutationen sind per Hook verboten, das ist
    ein bewusster manueller Einmal-Schritt. Ohne aktive Protection verweigert der
    Runner-Pre-Flight den Start (kein Auto-Merge ohne serverseitiges Gate).
-6. **CI-Gate (optional, Operator fragen):** `templates/ci/pr-deep-review.yml.template`
-   nach `.github/workflows/pr-deep-review.yml`, `templates/ci/tools/pr_review/*` nach
-   `.github/scripts/flowkit_review/`, beide setup-Actions nach `.github/actions/`.
+6. **CI-Gate (optional, Operator fragen):** `${CLAUDE_PLUGIN_ROOT}/templates/ci/pr-deep-review.yml.template`
+   nach `.github/workflows/pr-deep-review.yml`, `${CLAUDE_PLUGIN_ROOT}/templates/ci/tools/pr_review/*`
+   nach `.github/scripts/flowkit_review/`, beide setup-Actions
+   (`${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-claude-action`,
+   `${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-python-uv`) nach `.github/actions/`.
    Platzhalter aus `.github/flowkit-review.json` (aus Template anlegen) ersetzen.
    Secrets-Check: `gh secret list` muss CLAUDE_CODE_OAUTH_TOKEN enthalten, sonst
    Operator-Hinweis. Danach `actionlint` auf die erzeugte Datei, falls installiert.
 6b. **Blockierende Gates (nur wenn das Zielrepo KEINE eigene CI mit Test/Lint/Build
    hat — Repos mit bestehender CI überspringen diesen Punkt):**
-   `templates/ci/gates.yml.template` nach `.github/workflows/gates.yml`; Platzhalter
-   ersetzen: {{SETUP_CMD}} = Setup-Kommando aus CONFIG (z. B. "uv sync --extra dev"),
+   `${CLAUDE_PLUGIN_ROOT}/templates/ci/gates.yml.template` nach `.github/workflows/gates.yml`;
+   Platzhalter ersetzen: {{SETUP_CMD}} = Setup-Kommando aus CONFIG (z. B. "uv sync --extra dev"),
    {{TEST_CMD}}/{{LINT_CMD}}/{{TYPECHECK_CMD}} aus CONFIG.commands,
    {{DEFAULT_BRANCH}} aus CONFIG.defaultBranch. Danach `actionlint`, falls installiert.
 7. **.gitignore:** Zeile `.flowkit/` ergänzen.
