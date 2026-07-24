@@ -1,0 +1,36 @@
+name: Setup Python + uv (cached)
+description: >
+  Single setup step: pins Python via uv (no separate setup-python), installs
+  uv with on-disk cache keyed by uv.lock, and runs `uv sync --extra dev`.
+  Replaces the checkout+setup-python+setup-uv+uv-sync triplet that previously
+  ran on every CI job and re-downloaded the full dependency tree each time.
+
+inputs:
+  python-version:
+    description: "Python version pin handled by setup-uv."
+    required: false
+    default: "3.12"
+  extras:
+    description: "Extras passed to `uv sync` (e.g. 'dev'). Empty = bare sync."
+    required: false
+    default: "dev"
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+        python-version: ${{ inputs.python-version }}
+
+    - name: uv sync
+      shell: bash
+      env:
+        UV_EXTRAS: ${{ inputs.extras }}
+      run: |
+        if [ -n "${UV_EXTRAS}" ]; then
+          uv sync --extra "${UV_EXTRAS}"
+        else
+          uv sync
+        fi

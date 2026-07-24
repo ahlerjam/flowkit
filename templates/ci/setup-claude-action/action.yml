@@ -1,0 +1,35 @@
+# flowkit install copies both actions side by side into .github/actions/ of the target repo.
+name: setup-claude-action
+description: Setup uv + claude-code-action with OAuth (primary, backup-fallback on auth failure)
+inputs:
+  primary_token:
+    description: Primary CLAUDE_CODE_OAUTH_TOKEN
+    required: true
+  backup_token:
+    description: Backup CLAUDE_CODE_OAUTH_TOKEN_BACKUP (optional)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-python-uv
+    - shell: bash
+      env:
+        PRIMARY_TOKEN: ${{ inputs.primary_token }}
+        BACKUP_TOKEN: ${{ inputs.backup_token }}
+      run: |
+        # Token-Selection mit Backup-Fallback
+        if [ -n "${PRIMARY_TOKEN}" ]; then
+          echo "CLAUDE_TOKEN=${PRIMARY_TOKEN}" >> "$GITHUB_ENV"
+        elif [ -n "${BACKUP_TOKEN}" ]; then
+          echo "::warning::Using CLAUDE_CODE_OAUTH_TOKEN_BACKUP — primary token missing"
+          echo "CLAUDE_TOKEN=${BACKUP_TOKEN}" >> "$GITHUB_ENV"
+        else
+          echo "::error::No CLAUDE_CODE_OAUTH_TOKEN available"
+          exit 1
+        fi
+    - name: Resolve baked bun (skip oven-sh/setup-bun stale cache)
+      shell: bash
+      run: |
+        # BUN_PATH stays empty on runners without a preinstalled bun; claude-code-action then installs its own.
+        echo "BUN_PATH=$(command -v bun || true)" >> "$GITHUB_ENV"

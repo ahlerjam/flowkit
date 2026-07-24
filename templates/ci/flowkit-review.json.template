@@ -1,0 +1,8 @@
+{
+  "runnerLabels": ["ubuntu-latest"],
+  "models": { "codeReview": "claude-opus-4-8", "deadCode": "claude-sonnet-5", "docSync": "claude-sonnet-5", "iacSafety": "claude-opus-4-8", "verifier": "claude-opus-4-8" },
+  "apiChangePaths": [],
+  "iacChangePaths": [],
+  "deadCodePaths": [],
+  "docSyncMap": []
+}

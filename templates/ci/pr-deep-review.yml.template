@@ -1,0 +1,671 @@
+name: flowkit-pr-deep-review
+
+on:
+  # NOTE: no paths: filter — a required status check must always run, otherwise merges block forever on doc-only PRs.
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write  # required by claude-code-action for OIDC token fetch
+  actions: read  # lets claude-code-action's github_ci MCP server read CI status
+
+concurrency:
+  group: flowkit-pr-deep-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prep:
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 3
+    if: github.event.pull_request.draft == false
+    outputs:
+      has_api_changes: ${{ steps.detect.outputs.has_api_changes }}
+      has_iac_changes: ${{ steps.detect.outputs.has_iac_changes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-uv
+      - id: detect
+        name: Detect change categories
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          CHANGED="$(git diff --name-only "$BASE_SHA" HEAD)"
+          echo "$CHANGED" > "$RUNNER_TEMP/changed.txt"
+          API_RE="$(jq -r '.apiChangePaths | map("^" + .) | join("|")' .github/flowkit-review.json)"
+          IAC_RE="$(jq -r '.iacChangePaths | map("^" + .) | join("|")' .github/flowkit-review.json)"
+          for pair in "has_api_changes:$API_RE" "has_iac_changes:$IAC_RE"; do
+            key="${pair%%:*}"; re="${pair#*:}"
+            if [ -n "$re" ] && echo "$CHANGED" | grep -qE "$re"; then
+              echo "$key=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+      - name: Bounded diff + sanitize
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          git diff "$BASE_SHA" HEAD > "$RUNNER_TEMP/diff.patch"
+          # Truncate >200KB
+          head -c 204800 "$RUNNER_TEMP/diff.patch" > "$RUNNER_TEMP/diff.bounded.patch"
+          python3 .github/scripts/flowkit_review/sanitize_cli.py "$RUNNER_TEMP/diff.bounded.patch"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: pr-diff
+          path: ${{ runner.temp }}/diff.bounded.patch
+          retention-days: 1
+      - name: Fetch PR context (description + linked-issue acceptance criteria)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/pr-context.md"
+          {
+            echo "# PR #$PR context"
+            gh pr view "$PR" --repo "$REPO" --json title,body \
+              --jq '"## Title\n" + .title + "\n\n## Description\n" + (.body // "(none)")'
+            echo
+            echo "## Linked issues — acceptance criteria"
+            for n in $(gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences \
+                        --jq '.closingIssuesReferences[].number' 2>/dev/null); do
+              echo "### Issue #$n"
+              gh issue view "$n" --repo "$REPO" --json title,body \
+                --jq '"**" + .title + "**\n\n" + (.body // "(none)")'
+              echo
+            done
+          } > "$ctx" 2>/dev/null || echo "# PR #$PR context (unavailable)" > "$ctx"
+          # Bound to ~10 KB so reviewer prompts stay lean.
+          head -c 10240 "$ctx" > "$ctx.bounded" && mv "$ctx.bounded" "$ctx"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: pr-context
+          path: ${{ runner.temp }}/pr-context.md
+          retention-days: 1
+
+  code-review:
+    needs: prep
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-claude-action
+        with:
+          primary_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          backup_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          pattern: pr-*
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - uses: anthropics/claude-code-action@41ea7642c1436fa0ee57aae58347904b71a5af27 # v1.0.137
+        id: review
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_TOKEN }}
+          path_to_bun_executable: ${{ env.BUN_PATH }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are reviewing one pull request. Work in order:
+
+            Step 1 — Load context (do not skip):
+            - Read the bounded PR diff: ${{ runner.temp }}/diff.bounded.patch
+              This patch is the ONLY scope of your review. Do NOT report findings
+              on files or lines that are not in this diff (no whole-repo drive-by).
+            - Read the PR + linked-issue acceptance criteria:
+              ${{ runner.temp }}/pr-context.md
+            - Read AGENTS.md in the repo root and enforce its conventions on CHANGED code.
+
+            Step 2 — Review ONLY the changed hunks. Every finding's `evidence`
+            must cite the exact changed line (file:line from the diff) plus a
+            one-sentence concrete failure scenario. If you cannot tie a finding to
+            a specific changed line, omit it.
+
+            Step 3 — Severity (name the matching pattern in `evidence`):
+              P0 = block. Observable in THIS diff AND exploitable/data-losing:
+                injection via unsanitized input; missing auth on a new/changed
+                endpoint; a migration dropping a NOT NULL column without a
+                default; a handler that swallows errors and masks data loss.
+              P1 = must-fix. A new user-visible bug; a changed production path in
+                controller/ or worker/ with zero test coverage; an error response
+                missing code/message; a concrete perf regression in the diff;
+                a new or changed test that cannot fail (assert True, empty test
+                body, unconditional pytest.skip/xfail, or removed/weakened
+                assertions on a production path) — test-gaming under merge
+                pressure (category "regression").
+              P2 = backlog. Style, naming, docstrings, minor nits; OR a linked-
+                issue acceptance criterion the diff does not yet satisfy
+                (advisory — category "regression", do NOT escalate above P2).
+              NOT a finding: anything you cannot tie to a changed line; a pattern
+                that pre-existed this PR; an author TODO.
+              If uncertain whether a P0/P1 is real, omit it (precision > recall).
+
+            Filter findings with confidence below 80. De-duplicate your own
+            findings (same root cause within ~5 lines → keep the higher severity).
+
+            Output ONLY a JSON object (no markdown, no prose, no code fences).
+            Schema (conform exactly):
+            {"type":"object","required":["reviewer","confidence_filter","findings"],
+             "properties":{"reviewer":{"const":"code-review"},"confidence_filter":{"const":80},
+             "findings":{"type":"array","items":{"type":"object",
+             "required":["severity","category","title","evidence"],
+             "properties":{"severity":{"enum":["P0","P1","P2"]},
+             "category":{"enum":["security","data-loss","regression","doc-sync-violation",
+             "iac-safety","dead-code","performance","style","ci-failure"]},
+             "title":{"type":"string"},"file":{"type":["string","null"]},
+             "line":{"type":["integer","null"]},"evidence":{"type":"string"},
+             "recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}
+
+            Write the JSON to ${{ runner.temp }}/findings-code-review.json.
+            Do NOT post any PR comment; the coordinator owns the sticky comment.
+          claude_args: |
+            --model {{MODEL_CODE_REVIEW}}
+            --allowedTools "Bash(gh:*),Bash(git:*),Read,Grep,Glob,Write"
+            --json-schema '{"type":"object","required":["reviewer","confidence_filter","findings"],"properties":{"reviewer":{"const":"code-review"},"confidence_filter":{"const":80},"findings":{"type":"array","items":{"type":"object","required":["severity","category","title","evidence"],"properties":{"severity":{"enum":["P0","P1","P2"]},"category":{"enum":["security","data-loss","regression","doc-sync-violation","iac-safety","dead-code","performance","style","ci-failure"]},"title":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"evidence":{"type":"string"},"recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}'
+      - name: Prefer schema-enforced structured output if present
+        if: steps.review.outputs.structured_output != ''
+        env:
+          OUT: ${{ steps.review.outputs.structured_output }}
+        run: printf '%s' "$OUT" > "$RUNNER_TEMP/findings-code-review.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: findings-code-review
+          path: ${{ runner.temp }}/findings-code-review.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  dead-code:
+    needs: prep
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-uv
+      - name: Run vulture + ruff F401 (scoped to changed files)
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # vulture/ruff need the whole tree to judge "unused", but we keep only
+          # findings in files THIS PR changed — pre-existing dead code in
+          # untouched files is out of scope and the dominant false-positive
+          # source (it falsely escalates api/v1 + shared/models symbols to P1).
+          DEAD_PATHS="$(jq -r '.deadCodePaths | if length == 0 then ["."] else . end | join(" ")' .github/flowkit-review.json)"
+          uv run vulture $DEAD_PATHS \
+            --min-confidence 80 \
+            > "$RUNNER_TEMP/vulture.txt" 2>&1 || true
+          uv run ruff check --select F401 $DEAD_PATHS \
+            --output-format json > "$RUNNER_TEMP/ruff_f401.json" 2>/dev/null || true
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+          # vulture has no JSON output; embed text. ruff JSON parses cleanly.
+          python3 - <<'PY'
+          import json, os, pathlib
+          tmp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          changed = {ln.strip() for ln in (tmp / "changed.txt").read_text().splitlines() if ln.strip()}
+          cwd = os.getcwd()
+          vulture_all = (tmp / "vulture.txt").read_text() if (tmp / "vulture.txt").exists() else ""
+          # vulture lines: "path/to/file.py:42: unused function 'foo' (90% confidence)"
+          vulture_txt = "\n".join(ln for ln in vulture_all.splitlines() if ln.split(":", 1)[0] in changed)
+          try:
+              ruff_all = json.loads((tmp / "ruff_f401.json").read_text())
+          except Exception:
+              ruff_all = []
+
+          def _matches(fn: str) -> bool:
+              # ruff emits absolute filenames; changed.txt is repo-relative.
+              if not fn:
+                  return False
+              if fn in changed:
+                  return True
+              try:
+                  if os.path.relpath(fn, cwd) in changed:
+                      return True
+              except ValueError:
+                  pass
+              return any(fn.endswith("/" + c) for c in changed)
+
+          ruff = [r for r in ruff_all if _matches(r.get("filename", ""))]
+          (tmp / "dead_input.json").write_text(
+              json.dumps({"vulture_text": vulture_txt, "ruff_f401": ruff}, indent=2)
+          )
+          PY
+      - uses: ./.github/actions/setup-claude-action
+        with:
+          primary_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          backup_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+      - uses: anthropics/claude-code-action@41ea7642c1436fa0ee57aae58347904b71a5af27 # v1.0.137
+        id: review
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_TOKEN }}
+          path_to_bun_executable: ${{ env.BUN_PATH }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Run /dead-code-triage with the JSON findings located at
+            ${{ runner.temp }}/dead_input.json (keys: vulture_text, ruff_f401).
+            This input is ALREADY scoped to files this PR changed — report only
+            what is in it; do not scan the wider repo for pre-existing dead code.
+
+            For each finding, `evidence` must confirm the symbol is genuinely
+            unused: NOT re-exported by an __init__.py, NOT referenced via
+            getattr/reflection or FastAPI Depends() injection, NOT a Pydantic
+            field or a route/event decorator. If you cannot confirm all of these,
+            omit the finding.
+
+            Output ONLY a JSON object (no markdown, no prose, no code fences), with
+            reviewer = "dead-code", confidence_filter = 80. All findings get
+            category = "dead-code". Severity: P2 unless the dead symbol is in
+            controller/api/v1/ or shared/models/ (then P1).
+
+            Schema (conform exactly):
+            {"type":"object","required":["reviewer","confidence_filter","findings"],
+             "properties":{"reviewer":{"const":"dead-code"},"confidence_filter":{"const":80},
+             "findings":{"type":"array","items":{"type":"object",
+             "required":["severity","category","title","evidence"],
+             "properties":{"severity":{"enum":["P0","P1","P2"]},
+             "category":{"enum":["security","data-loss","regression","doc-sync-violation",
+             "iac-safety","dead-code","performance","style","ci-failure"]},
+             "title":{"type":"string"},"file":{"type":["string","null"]},
+             "line":{"type":["integer","null"]},"evidence":{"type":"string"},
+             "recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}
+
+            Write the JSON to ${{ runner.temp }}/findings-dead-code.json.
+          claude_args: |
+            --model {{MODEL_DEAD_CODE}}
+            --allowedTools "Bash(cat:*),Bash(jq:*),Read,Write,Glob"
+            --json-schema '{"type":"object","required":["reviewer","confidence_filter","findings"],"properties":{"reviewer":{"const":"dead-code"},"confidence_filter":{"const":80},"findings":{"type":"array","items":{"type":"object","required":["severity","category","title","evidence"],"properties":{"severity":{"enum":["P0","P1","P2"]},"category":{"enum":["security","data-loss","regression","doc-sync-violation","iac-safety","dead-code","performance","style","ci-failure"]},"title":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"evidence":{"type":"string"},"recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}'
+      - name: Prefer schema-enforced structured output if present
+        if: steps.review.outputs.structured_output != ''
+        env:
+          OUT: ${{ steps.review.outputs.structured_output }}
+        run: printf '%s' "$OUT" > "$RUNNER_TEMP/findings-dead-code.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: findings-dead-code
+          path: ${{ runner.temp }}/findings-dead-code.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  doc-sync:
+    needs: prep
+    if: needs.prep.outputs.has_api_changes == 'true'
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-claude-action
+        with:
+          primary_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          backup_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          pattern: pr-*
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - uses: anthropics/claude-code-action@41ea7642c1436fa0ee57aae58347904b71a5af27 # v1.0.137
+        id: review
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_TOKEN }}
+          path_to_bun_executable: ${{ env.BUN_PATH }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Step 1 — Read the PR diff: ${{ runner.temp }}/diff.bounded.patch
+            Review ONLY files changed in this diff.
+
+            Step 2 — Apply the required-doc map from .github/flowkit-review.json
+            (key docSyncMap: list of {sourceGlob, requiredDocs}) — read that file
+            first. For each changed source file, check whether the matching doc
+            update is ALSO present in the diff.
+            If a mapping hits but its doc counterpart is NOT in the diff, emit one
+            finding per missing doc. `evidence` cites the changed source file
+            (file:line from the diff) and names the doc that should have changed.
+            Do NOT flag cosmetic YAML formatting; if the doc IS updated in the
+            diff, do not report it.
+
+            Output ONLY a JSON object (no markdown, no prose, no code fences), with
+            reviewer = "doc-sync", confidence_filter = 80.
+            All findings get category = "doc-sync-violation", severity = P1.
+
+            Schema (conform exactly):
+            {"type":"object","required":["reviewer","confidence_filter","findings"],
+             "properties":{"reviewer":{"const":"doc-sync"},"confidence_filter":{"const":80},
+             "findings":{"type":"array","items":{"type":"object",
+             "required":["severity","category","title","evidence"],
+             "properties":{"severity":{"enum":["P0","P1","P2"]},
+             "category":{"enum":["security","data-loss","regression","doc-sync-violation",
+             "iac-safety","dead-code","performance","style","ci-failure"]},
+             "title":{"type":"string"},"file":{"type":["string","null"]},
+             "line":{"type":["integer","null"]},"evidence":{"type":"string"},
+             "recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}
+
+            Write the JSON to ${{ runner.temp }}/findings-doc-sync.json.
+          claude_args: |
+            --model {{MODEL_DOC_SYNC}}
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Write"
+            --json-schema '{"type":"object","required":["reviewer","confidence_filter","findings"],"properties":{"reviewer":{"const":"doc-sync"},"confidence_filter":{"const":80},"findings":{"type":"array","items":{"type":"object","required":["severity","category","title","evidence"],"properties":{"severity":{"enum":["P0","P1","P2"]},"category":{"enum":["security","data-loss","regression","doc-sync-violation","iac-safety","dead-code","performance","style","ci-failure"]},"title":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"evidence":{"type":"string"},"recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}'
+      - name: Prefer schema-enforced structured output if present
+        if: steps.review.outputs.structured_output != ''
+        env:
+          OUT: ${{ steps.review.outputs.structured_output }}
+        run: printf '%s' "$OUT" > "$RUNNER_TEMP/findings-doc-sync.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: findings-doc-sync
+          path: ${{ runner.temp }}/findings-doc-sync.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  iac-safety:
+    needs: prep
+    if: needs.prep.outputs.has_iac_changes == 'true'
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-claude-action
+        with:
+          primary_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          backup_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          pattern: pr-*
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - uses: anthropics/claude-code-action@41ea7642c1436fa0ee57aae58347904b71a5af27 # v1.0.137
+        id: review
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_TOKEN }}
+          path_to_bun_executable: ${{ env.BUN_PATH }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Step 1 — Read the PR diff: ${{ runner.temp }}/diff.bounded.patch
+            Review ONLY hunks in this diff (infra/, server-setup/,
+            alembic/versions/). Do not audit unchanged IaC files.
+
+            Check changed IaC/migration hunks for: destructive schema changes
+            without rollback, hardcoded secrets, world-open firewall rules,
+            missing lifecycle management. Apply repo conventions from AGENTS.md.
+
+            Output ONLY a JSON object (no markdown, no prose, no code fences), with
+            reviewer = "iac-safety", confidence_filter = 80.
+            Category = "iac-safety", severity per impact (data-loss → P0,
+            deploy-risk → P1, style → P2).
+
+            Schema (conform exactly):
+            {"type":"object","required":["reviewer","confidence_filter","findings"],
+             "properties":{"reviewer":{"const":"iac-safety"},"confidence_filter":{"const":80},
+             "findings":{"type":"array","items":{"type":"object",
+             "required":["severity","category","title","evidence"],
+             "properties":{"severity":{"enum":["P0","P1","P2"]},
+             "category":{"enum":["security","data-loss","regression","doc-sync-violation",
+             "iac-safety","dead-code","performance","style","ci-failure"]},
+             "title":{"type":"string"},"file":{"type":["string","null"]},
+             "line":{"type":["integer","null"]},"evidence":{"type":"string"},
+             "recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}
+
+            Write the JSON to ${{ runner.temp }}/findings-iac-safety.json.
+          claude_args: |
+            --model {{MODEL_IAC_SAFETY}}
+            --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*)"
+            --json-schema '{"type":"object","required":["reviewer","confidence_filter","findings"],"properties":{"reviewer":{"const":"iac-safety"},"confidence_filter":{"const":80},"findings":{"type":"array","items":{"type":"object","required":["severity","category","title","evidence"],"properties":{"severity":{"enum":["P0","P1","P2"]},"category":{"enum":["security","data-loss","regression","doc-sync-violation","iac-safety","dead-code","performance","style","ci-failure"]},"title":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"evidence":{"type":"string"},"recommendation":{"type":["string","null"]},"confidence":{"type":"integer"}}}}}}'
+      - name: Prefer schema-enforced structured output if present
+        if: steps.review.outputs.structured_output != ''
+        env:
+          OUT: ${{ steps.review.outputs.structured_output }}
+        run: printf '%s' "$OUT" > "$RUNNER_TEMP/findings-iac-safety.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: findings-iac-safety
+          path: ${{ runner.temp }}/findings-iac-safety.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  verifier:
+    # Adversarial second opinion: refute each merged P0/P1 against the diff so
+    # only confirmed blockers reach the gate (the 'first green = merge' policy
+    # makes pass-1 precision the highest-value lever). Best-effort — if this job
+    # produces no verdicts the coordinator filters nothing (zero blast radius).
+    needs: [prep, code-review, dead-code, doc-sync, iac-safety]
+    if: always() && needs.prep.result == 'success'
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-claude-action
+        with:
+          primary_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          backup_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          path: ${{ runner.temp }}/findings
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          pattern: pr-*
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - id: gather
+        name: Gather merged P0/P1 findings (excl. ci-failure)
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          p0p1="$RUNNER_TEMP/p0p1.json"
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/findings/findings-*/findings-*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo '[]' > "$p0p1"
+          else
+            for f in "${files[@]}"; do
+              jq -c '.findings[]? | select(.severity=="P0" or .severity=="P1") | select(.category!="ci-failure")' "$f" || true
+            done | jq -s 'unique_by([.file,.line,.title])' > "$p0p1"
+          fi
+          count=$(jq 'length' "$p0p1")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Found $count P0/P1 finding(s) to verify"
+      - uses: anthropics/claude-code-action@41ea7642c1436fa0ee57aae58347904b71a5af27 # v1.0.137
+        id: verify
+        if: steps.gather.outputs.count != '0'
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_TOKEN }}
+          path_to_bun_executable: ${{ env.BUN_PATH }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are an adversarial verifier. The reviewers flagged the P0/P1
+            findings in ${{ runner.temp }}/p0p1.json. The bounded PR diff is in
+            ${{ runner.temp }}/diff.bounded.patch.
+
+            For EACH finding, try to REFUTE it: is the problem actually observable
+            in a CHANGED line of the diff and exploitable/incorrect as claimed?
+            Default to "refuted" when the evidence does not hold up against the
+            diff (e.g. it cites an unchanged/pre-existing line, the impact is
+            overstated, or it cannot be located). Mark "confirmed" only when you
+            can independently see the problem in a changed line. Echo back each
+            finding's title, file and line EXACTLY so it can be matched.
+          claude_args: |
+            --model {{MODEL_VERIFIER}}
+            --allowedTools "Read,Grep,Glob,Bash(cat:*)"
+            --json-schema '{"type":"object","required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","required":["title","verdict"],"properties":{"title":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"verdict":{"enum":["confirmed","refuted"]},"rationale":{"type":"string"}}}}}}'
+      - name: Materialize verdicts
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+          OUT: ${{ steps.verify.outputs.structured_output }}
+        run: |
+          if [ -n "${OUT:-}" ]; then
+            printf '%s' "$OUT" > "$RUNNER_TEMP/verdicts.json"
+          else
+            echo '{"verdicts":[]}' > "$RUNNER_TEMP/verdicts.json"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: verdicts
+          path: ${{ runner.temp }}/verdicts.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  coordinator:
+    needs: [prep, code-review, dead-code, doc-sync, iac-safety, verifier]
+    if: always() && needs.prep.result == 'success'
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-python-uv
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          path: ${{ runner.temp }}/findings
+
+      - name: Substitute missing artifacts (skip-aware)
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+          CODE_REVIEW_RESULT: ${{ needs.code-review.result }}
+          DEAD_CODE_RESULT: ${{ needs.dead-code.result }}
+          DOC_SYNC_RESULT: ${{ needs.doc-sync.result }}
+          IAC_SAFETY_RESULT: ${{ needs.iac-safety.result }}
+        run: |
+          set -euo pipefail
+
+          declare -A RESULTS=(
+            [code-review]="$CODE_REVIEW_RESULT"
+            [dead-code]="$DEAD_CODE_RESULT"
+            [doc-sync]="$DOC_SYNC_RESULT"
+            [iac-safety]="$IAC_SAFETY_RESULT"
+          )
+
+          for reviewer in code-review dead-code doc-sync iac-safety; do
+            f="$RUNNER_TEMP/findings/findings-${reviewer}/findings-${reviewer}.json"
+            if [ -f "$f" ]; then
+              continue   # artifact exists — use it as-is
+            fi
+
+            mkdir -p "$RUNNER_TEMP/findings/findings-${reviewer}"
+            result="${RESULTS[$reviewer]}"
+
+            if [ "$result" = "skipped" ]; then
+              # Skipped via path-filter — empty findings (legitimate, not a failure)
+              printf '%s\n' \
+                '{' \
+                "  \"reviewer\": \"${reviewer}\"," \
+                '  "confidence_filter": 0,' \
+                '  "findings": []' \
+                '}' \
+                > "$f"
+            else
+              # failure / cancelled / unknown — ci-failure placeholder
+              printf '%s\n' \
+                '{' \
+                "  \"reviewer\": \"${reviewer}\"," \
+                '  "confidence_filter": 0,' \
+                '  "findings": [{' \
+                '    "severity": "P1",' \
+                '    "category": "ci-failure",' \
+                "    \"title\": \"Reviewer ${reviewer} did not produce output (result=${result})\"," \
+                '    "evidence": "Artifact missing — reviewer job crashed, timed out, or was cancelled.",' \
+                '    "recommendation": "Re-run the workflow or investigate logs.",' \
+                '    "confidence": 100' \
+                '  }]' \
+                '}' \
+                > "$f"
+            fi
+          done
+
+          echo "Status per reviewer:"
+          for reviewer in code-review dead-code doc-sync iac-safety; do
+            f="$RUNNER_TEMP/findings/findings-${reviewer}/findings-${reviewer}.json"
+            count=$(jq '.findings | length' "$f")
+            echo "  $reviewer: result=${RESULTS[$reviewer]}, findings=$count"
+          done
+
+      - name: Merge findings
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          python3 .github/scripts/flowkit_review/merge.py \
+            --input "$RUNNER_TEMP/findings/findings-code-review/findings-code-review.json" \
+                    "$RUNNER_TEMP/findings/findings-dead-code/findings-dead-code.json" \
+                    "$RUNNER_TEMP/findings/findings-doc-sync/findings-doc-sync.json" \
+                    "$RUNNER_TEMP/findings/findings-iac-safety/findings-iac-safety.json" \
+            --output "$RUNNER_TEMP/findings.json"
+
+      - name: Download verifier verdicts
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        continue-on-error: true
+        with:
+          name: verdicts
+          path: ${{ runner.temp }}/verdicts
+      - name: Apply verifier verdicts (drop refuted P0/P1)
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          python3 .github/scripts/flowkit_review/apply_verdicts.py \
+            --findings "$RUNNER_TEMP/findings.json" \
+            --verdicts "$RUNNER_TEMP/verdicts/verdicts.json" \
+            --output "$RUNNER_TEMP/findings.json"
+
+      - name: Render sticky comment
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          python3 .github/scripts/flowkit_review/render.py \
+            "$RUNNER_TEMP/findings.json" \
+            --output "$RUNNER_TEMP/comment.md"
+
+      - name: Post or update sticky comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # Use REST endpoint (not `gh pr view --json comments`) — the latter
+          # returns GraphQL node-IDs (`IC_kw…`) which the REST PATCH
+          # `repos/{owner}/{repo}/issues/comments/{comment_id}` does not accept
+          # → 404. The REST list endpoint returns the numeric comment_id.
+          # Match the flowkit sticky-comment marker so existing comments are
+          # updated in place.
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.body | contains("<!-- flowkit-review:v1 -->"))] | .[0].id // empty')
+          if [ -n "$existing" ]; then
+            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{"body": $body}' \
+              | gh api "repos/$REPO/issues/comments/$existing" -X PATCH --input -
+          else
+            gh pr comment "$PR" --body-file "$RUNNER_TEMP/comment.md"
+          fi
+
+      - name: Enforce gate policy
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          FLOWKIT_OVERRIDE_LABEL: {{OVERRIDE_LABEL}}
+        run: |
+          python3 .github/scripts/flowkit_review/gate.py \
+            "$RUNNER_TEMP/findings.json" \
+            --labels "$PR_LABELS"

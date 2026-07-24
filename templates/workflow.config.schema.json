@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ahlerjam/flowkit/templates/workflow.config.schema.json",
+  "type": "object",
+  "required": ["repoSlug", "commands", "protectedAreas", "parallelism", "budgets", "models", "autoReady"],
+  "properties": {
+    "repoSlug": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+    "defaultBranch": { "type": "string", "default": "main" },
+    "pushCommand": { "type": "string", "default": "git push", "description": "z. B. git pushci wenn Local-CI-Gate installiert ist" },
+    "commands": {
+      "type": "object", "required": ["test", "lint"],
+      "properties": { "test": { "type": "string" }, "lint": { "type": "string" }, "typecheck": { "type": "string" }, "smoke": { "type": "string" } }
+    },
+    "extraGates": { "type": "array", "items": { "type": "string" }, "description": "weitere lokale Gate-Kommandos (OpenAPI-Check, Schema-Drift ...)" },
+    "protectedAreas": { "type": "array", "items": { "type": "string" } },
+    "areas": { "type": "array", "items": { "type": "string" } },
+    "parallelism": { "type": "integer", "minimum": 1, "maximum": 4 },
+    "caps": { "type": "object", "properties": { "maxParallel": { "type": "integer", "minimum": 1, "maximum": 4 }, "issuesPerRun": { "type": "integer", "minimum": 1 }, "groomingIssuesPerWeek": { "type": "integer", "minimum": 0 } } },
+    "opusTurnWeight": { "type": "integer", "default": 3 },
+    "onSmokeFailure": { "enum": ["revert", "pause-cd", "p0-issue"], "default": "revert" },
+    "budgets": {
+      "type": "object", "required": ["S", "M", "L"],
+      "additionalProperties": { "type": "object", "required": ["turns", "tokens"], "properties": { "turns": { "type": "integer" }, "tokens": { "type": "integer" } } }
+    },
+    "models": {
+      "type": "object",
+      "properties": {
+        "grooming": { "type": "string" },
+        "planner": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
+        "builder": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
+        "verifier": { "type": "string" },
+        "critic": { "type": "string" },
+        "escalation": { "type": "string" }
+      }
+    },
+    "autoReady": { "type": "object", "required": ["impulse", "gapScan"], "properties": { "impulse": { "enum": ["P1", "P2", "P3"] }, "gapScan": { "enum": ["off", "P1", "P2", "P3"] } } },
+    "maxFixRounds": { "type": "integer", "default": 3 },
+    "mergeCheck": { "type": "string", "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün" },
+    "overrideLabel": { "type": "string" },
+    "markers": { "type": "object", "properties": { "plan": { "type": "string" }, "acVerify": { "type": "string" }, "critic": { "type": "string" } } },
+    "milestoneExcludeRegex": { "type": "string" },
+    "excludeLabels": { "type": "array", "items": { "type": "string" } },
+    "issueLimit": { "type": "integer", "default": 300 },
+    "browserProof": { "type": "boolean", "default": false },
+    "notify": { "type": "boolean", "default": false },
+    "critic": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "fallback": { "enum": ["claude", "skip"], "description": "Verhalten ohne Codex-Zugang: claude = Same-Family-Ersatz-Review (Fokus Spec-Compliance + Test-Manipulation), skip = Station überspringen. Default: claude" } } }
+  }
+}
