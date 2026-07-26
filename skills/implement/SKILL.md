@@ -92,6 +92,9 @@ annehmen und im Issue nachlabeln) · `area` = erstes `area/*`-Label.
    (falls gesetzt; rot → onSmokeFailure-Policy + keine weiteren Merges).
    Alle Fix-Runden aus 3.-6. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds.
+7. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
+   lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
+   Worktree-Drift (Erstlauf-Befund 2026-07-26).
 
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 

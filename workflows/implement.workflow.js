@@ -196,6 +196,17 @@ const runUnit = async (u) => {
 
   const gate = await withMergeLock(() => agent(gatePrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
+
+  // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
+  // UNVERÄNDERTE Worktrees auf — nach einem Build bleiben Worktree + lokaler
+  // Feature-Branch liegen (Drift-Quelle). Best-effort, außerhalb des Merge-Locks;
+  // darf den Einheit-Erfolg nie kippen.
+  try {
+    await agent(`${PRE}POST-MERGE-CLEANUP für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert, Remote-Branch bereits gelöscht). NUR aufräumen, nichts implementieren: 1. git worktree list — jeden Worktree, dessen Branch ${built.branch} ist, mit git worktree remove --force entfernen. 2. git branch -D ${built.branch} (existiert er nicht mehr, ok). 3. git worktree prune. Haupt-Tree (${BRANCH}) und fremde Worktrees/Branches NICHT anfassen.`,
+      { label: `cleanup #${n}`, phase: 'Implement', model: 'haiku' })
+  } catch (e) {
+    LOG(`#${n} Post-Merge-Cleanup übersprungen: ${e && e.message ? e.message : String(e)}`)
+  }
   return { pr, fixRounds, postMergeRed: gate.postMergeGreen === false, note: gate.note || '' }
 }
 
