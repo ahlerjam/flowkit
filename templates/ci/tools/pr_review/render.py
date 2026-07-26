@@ -12,6 +12,37 @@ OPEN_MARKER = "<!-- flowkit-review:v1 -->"
 JSON_MARKER_OPEN = "<!-- flowkit-review-json:v1"
 JSON_MARKER_CLOSE = "-->"
 
+# A file that keeps producing blocking findings across this many consecutive
+# review rounds gets a visible convergence hint (the gate itself is untouched).
+CONVERGENCE_THRESHOLD = 3
+
+
+def extract_prev_file_rounds(previous_body: str) -> dict[str, int]:
+    """Parse the per-file round counter from a previous sticky comment.
+
+    Fail-safe: any parse problem returns an empty dict (the counter resets,
+    the warning is lost for one round, the gate is never affected).
+    """
+    start_idx = previous_body.find(JSON_MARKER_OPEN)
+    if start_idx < 0:
+        return {}
+    start = start_idx + len(JSON_MARKER_OPEN)
+    end = previous_body.rfind(JSON_MARKER_CLOSE)
+    if end <= start:
+        return {}
+    try:
+        prev = json.loads(previous_body[start:end].strip())
+    except json.JSONDecodeError:
+        return {}
+    rounds = prev.get("fileRounds")
+    if not isinstance(rounds, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in rounds.items():
+        if isinstance(key, str) and isinstance(value, int) and value > 0:
+            out[key] = value
+    return out
+
 
 def find_marker_in_body(body: str) -> bool:
     """Return True if body contains the sticky-comment marker.
@@ -38,8 +69,12 @@ def _format_finding(f: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
-def render_sticky_comment(payload: dict[str, Any]) -> str:
+def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> str:
     """Render findings.json to human + machine-readable Markdown comment.
+
+    Carries a per-file counter of consecutive rounds with blocking (P0/P1)
+    findings across renders via the embedded JSON marker; files at or above
+    CONVERGENCE_THRESHOLD get a visible operator hint.
 
     Raises:
         ValueError: if any finding is missing 'severity' field.
@@ -58,6 +93,18 @@ def render_sticky_comment(payload: dict[str, Any]) -> str:
         "P2": [f for f in findings if f["severity"] == "P2"],
     }
 
+    prev_rounds = extract_prev_file_rounds(previous_body) if previous_body else {}
+    blocking_files = sorted(
+        {f["file"] for f in findings if f["severity"] in ("P0", "P1") and f.get("file")}
+    )
+    file_rounds = {name: prev_rounds.get(name, 0) + 1 for name in blocking_files}
+    payload = dict(payload)
+    if file_rounds:
+        payload["fileRounds"] = file_rounds
+    else:
+        payload.pop("fileRounds", None)
+    convergence = [(n, c) for n, c in file_rounds.items() if c >= CONVERGENCE_THRESHOLD]
+
     lines: list[str] = [
         OPEN_MARKER,
         "## flowkit PR Deep Review",
@@ -67,6 +114,19 @@ def render_sticky_comment(payload: dict[str, Any]) -> str:
         f"- **P2 (Backlog):** {len(by_sev['P2'])}",
         "",
     ]
+
+    if convergence:
+        parts = "; ".join(
+            f"`{name}` carries P0/P1 findings for {count} consecutive review rounds"
+            for name, count in convergence
+        )
+        lines.append(
+            f"> :warning: **Convergence alert:** {parts}. "
+            "Operator review recommended — repeated rounds on the same artifact "
+            "suggest the review is chasing an unreachable ideal or the fix "
+            "approach needs a rethink. The gate stays fully active."
+        )
+        lines.append("")
 
     if not findings:
         lines.append("No findings — clean review.")
@@ -100,10 +160,20 @@ def _cli() -> int:
     parser = argparse.ArgumentParser(description="Render findings.json to PR-comment Markdown.")
     parser.add_argument("findings", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--previous",
+        type=Path,
+        default=None,
+        help="File containing the body of the existing sticky comment (optional).",
+    )
     args = parser.parse_args()
 
+    previous_body = ""
+    if args.previous is not None and args.previous.exists():
+        previous_body = args.previous.read_text()
+
     payload = json.loads(args.findings.read_text())
-    args.output.write_text(render_sticky_comment(payload))
+    args.output.write_text(render_sticky_comment(payload, previous_body=previous_body))
     sys.stderr.write(f"Wrote sticky comment to {args.output}\n")
     return 0
 

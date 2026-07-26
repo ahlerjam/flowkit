@@ -148,6 +148,14 @@ jobs:
               P2 = backlog. Style, naming, docstrings, minor nits; OR a linked-
                 issue acceptance criterion the diff does not yet satisfy
                 (advisory — category "regression", do NOT escalate above P2).
+              Defense-in-depth artifacts (hooks, blocklists, allowlists, guard
+                regexes): judge them against the scope statement documented in
+                the file header, not against an adversarially complete ideal.
+                A bypass that requires deliberate construction (eval, variable
+                indirection, command substitution, exotic quoting or encoding
+                tricks) is P2 at most — the hard enforcement lines are branch
+                protection, required checks and the permission allowlist, not
+                the filter itself.
               NOT a finding: anything you cannot tie to a changed line; a pattern
                 that pre-existed this PR; an author TODO.
               If uncertain whether a P0/P1 is real, omit it (precision > recall).
@@ -630,10 +638,21 @@ jobs:
 
       - name: Render sticky comment
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
+          set -euo pipefail
+          # Fetch the existing sticky comment (if any) so render.py can carry
+          # the per-file P0/P1 round counter across review rounds and surface
+          # a convergence hint after 3 rounds on the same file.
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.body | contains("<!-- flowkit-review:v1 -->"))] | .[0].body // ""' \
+            > "$RUNNER_TEMP/previous-comment.md" || printf '' > "$RUNNER_TEMP/previous-comment.md"
           python3 .github/scripts/flowkit_review/render.py \
             "$RUNNER_TEMP/findings.json" \
+            --previous "$RUNNER_TEMP/previous-comment.md" \
             --output "$RUNNER_TEMP/comment.md"
 
       - name: Post or update sticky comment

@@ -10,7 +10,7 @@
   },
   "extraGates": [],
   "protectedAreas": ["security", "auth", "billing", "migrations", "scaling"],
-  "areas": ["frontend", "backend", "infra", "security", "docs"],
+  "areas": ["frontend", "backend", "infra", "security", "auth", "billing", "migrations", "scaling", "docs"],
   "parallelism": 3,
   "caps": { "maxParallel": 4, "issuesPerRun": 10, "groomingIssuesPerWeek": 15 },
   "budgets": {
