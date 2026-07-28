@@ -18,10 +18,43 @@ for (const sz of ['S', 'M', 'L']) {
     throw new Error(`flowkit: budgets.${sz}.tokens fehlt — der Token-Deckel wäre sonst still deaktiviert (Schema verlangt tokens).`)
   }
 }
+if (C.respectDependencies !== undefined && typeof C.respectDependencies !== 'boolean') {
+  throw new Error(`flowkit: respectDependencies muss boolean sein (ist ${typeof C.respectDependencies}) — ein String wie "false" wäre truthy und würde den Dependency-Schutz still ins Gegenteil kehren.`)
+}
+const RESPECT_DEPS = C.respectDependencies !== false
+// GitHub-native Issue-Dependencies ("blocked by"). Der Skill löst sie EINMAL bei
+// der Scope-Auflösung auf (gh issue list --json ...,blockedBy) und hängt die noch
+// OFFENEN Blocker als unit.blockedBy = [<issue-nummern>] an. Hier wird nur noch
+// lokal geprüft — kein Netzzugriff im Scheduler, kein async pickNext.
+// Fehlt das Feld (alter Aufrufer), gilt die Einheit als unblockiert.
+const blockersOf = (u) => {
+  if (!RESPECT_DEPS || !u || !Array.isArray(u.blockedBy)) return []
+  return u.blockedBy.map((b) => {
+    const num = Number(b && typeof b === 'object' ? b.number : b)
+    if (!Number.isInteger(num)) {
+      throw new Error(`flowkit: unit #${u.n}.blockedBy enthält ${JSON.stringify(b)} — erwartet sind Issue-Nummern. Ein nicht auflösbarer Eintrag würde die Einheit dauerhaft blockieren.`)
+    }
+    return num
+  })
+}
+
 const units0 = Array.isArray(A.units) ? A.units.slice() : []
 const RUNCAP = (C.caps && C.caps.issuesPerRun) || 10
-const units = units0.slice(0, RUNCAP)
-if (units0.length > units.length) LOG(`flowkit: caps.issuesPerRun=${RUNCAP} — ${units0.length - units.length} Einheit(en) zurückgestellt.`)
+let units = units0.slice(0, RUNCAP)
+if (units0.length > units.length) {
+  // Cap-Kohärenz: schneidet der Cap einen Blocker weg, während sein Abhängiger im
+  // Lauf bleibt, wäre der Abhängige garantiert dauerhaft blockiert. Solche Einheiten
+  // werden mit zurückgestellt (nicht als "blocked" gemeldet — sie sind nur vertagt).
+  const deferred = new Set(units0.slice(RUNCAP).map((u) => u.n))
+  for (let pass = 0; pass < units0.length; pass++) {
+    const keep = units.filter((u) => !blockersOf(u).some((b) => deferred.has(b)))
+    if (keep.length === units.length) break
+    for (const u of units) if (!keep.includes(u)) deferred.add(u.n)
+    units = keep
+  }
+  LOG(`flowkit: caps.issuesPerRun=${RUNCAP} — ${units0.length - units.length} Einheit(en) zurückgestellt (inklusive Einheiten, deren Blocker der Cap abgeschnitten hat).`)
+}
+units.forEach(blockersOf) // fail-fast: kaputte blockedBy-Angaben sofort, nicht mitten im Lauf
 
 // Engine-Vertrag (Annahme A0, Task A0): strukturelle Guards statt stiller Fehlfunktion.
 const HAS_PAR = typeof parallel === 'function'
@@ -221,14 +254,62 @@ const queue = units.slice()
 const failures = {}
 const done = []
 const failed = []
+const blocked = []
 let stopped = null
 const inFlightAreas = new Set()
+const inFlightIssues = new Set()
+const inRun = new Set(units.map((u) => u.n))
+// doneOk = in DIESEM Lauf sauber erledigt (merged oder bereits erledigt) — nur das
+// gibt Abhängige frei. unresolved = im Lauf beendet OHNE Erledigung (needs-human,
+// Budget-Abbruch, technischer Endfehler, selbst blockiert) — macht Abhängige tot.
+const doneOk = new Set()
+const unresolved = new Set()
+
+// Warte-Signal statt Busy-Loop: ein Worker, der gerade nichts Lauffähiges findet,
+// während andere Einheiten laufen, schläft bis zur nächsten Fertigmeldung. Ohne
+// das würde er sich beenden und die Parallelität für den Rest des Laufs senken.
+const WAIT = Symbol('wait')
+let waiters = []
+const notifyProgress = () => { const w = waiters; waiters = []; for (const r of w) r() }
+const waitProgress = () => new Promise((res) => waiters.push(res))
+
+const runnable = (u) => blockersOf(u).every((b) => doneOk.has(b))
+// Blocker, die in diesem Lauf nie mehr erfüllt werden können: nicht Teil des Laufs
+// (auf GitHub offen — geschlossene filtert schon der Skill heraus) oder im Lauf
+// gescheitert. Diese Einheiten dürfen NICHT requeued werden (Endlosschleife).
+const deadBlockers = (u) => blockersOf(u).filter((b) => !doneOk.has(b) && (!inRun.has(b) || unresolved.has(b)))
+const dropBlocked = (u, by) => {
+  unresolved.add(u.n)
+  blocked.push({ n: u.n, by })
+  LOG(`#${u.n} dauerhaft blockiert durch ${JSON.stringify(by)} — aus der Queue genommen (kein Requeue).`)
+}
 
 const pickNext = () => {
-  if (!queue.length) return null
-  let idx = queue.findIndex((u) => !u.area || !inFlightAreas.has(u.area))
-  if (idx === -1) idx = 0
-  return queue.splice(idx, 1)[0]
+  for (;;) {
+    if (!queue.length) return null
+    const dead = queue.findIndex((u) => deadBlockers(u).length > 0)
+    if (dead !== -1) {
+      const u = queue.splice(dead, 1)[0]
+      dropBlocked(u, deadBlockers(u))
+      continue // transitiv: Abhängige des gerade Aussortierten fallen in der nächsten Runde
+    }
+    // Area-Serialisierung bleibt eine Optimierung (Fallback erlaubt), die
+    // Dependency-Prüfung ist Korrektheit — der Fallback sucht deshalb NUR unter
+    // lauffähigen Einheiten. Ohne blockedBy ist runnable() immer true und der
+    // Fallback trifft wie bisher das Kopfelement.
+    let idx = queue.findIndex((u) => runnable(u) && (!u.area || !inFlightAreas.has(u.area)))
+    if (idx === -1) idx = queue.findIndex(runnable)
+    if (idx !== -1) {
+      const u = queue.splice(idx, 1)[0]
+      inFlightIssues.add(u.n)
+      return u
+    }
+    if (inFlightIssues.size) return WAIT // ein laufender Blocker kann noch freigeben
+    // Nichts lauffähig, nichts in Arbeit, Queue nicht leer = Zyklus (A blockt B,
+    // B blockt A). Sauber ausweisen statt hängen.
+    for (const u of queue.splice(0, queue.length)) dropBlocked(u, blockersOf(u).filter((b) => !doneOk.has(b)))
+    return null
+  }
 }
 
 // Inhaltlicher Gate-Fail: Einheit stoppt (needs-human), der LAUF fährt fort (Spec §6).
@@ -246,6 +327,7 @@ const cleanupUnit = async (u, reason) => {
 const worker = async () => {
   while (!stopped) {
     const u = pickNext()
+    if (u === WAIT) { await waitProgress(); continue }
     if (!u) return
     if (u.area) inFlightAreas.add(u.area)
     const start = TOKEN_MODE === 'delta' ? budget.spent() : 0
@@ -253,6 +335,10 @@ const worker = async () => {
       const res = await runUnit(u)
       const tokens = TOKEN_MODE === 'delta' ? budget.spent() - start : null
       done.push(Object.assign({ issue: u.n, tokens, size: u.size }, res))
+      // Dependency-Buchführung: ein Budget-Abbruch ist KEINE Erledigung — die
+      // Arbeit ist nicht gemergt, Abhängige dürfen darauf nicht aufsetzen.
+      if (res.budgetExceeded) unresolved.add(u.n)
+      else doneOk.add(u.n)
       LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
       if (res.postMergeRed) {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
@@ -262,6 +348,7 @@ const worker = async () => {
       const msg = e && e.message ? e.message : String(e)
       if (msg.startsWith('GATE:')) {
         await needsHumanStop(u, msg)
+        unresolved.add(u.n)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
         LOG(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
       } else {
@@ -271,6 +358,7 @@ const worker = async () => {
         if (failures[u.n] >= 2) {
           stopped = { issue: u.n, reason: msg }
           failed.push(u.n)
+          unresolved.add(u.n)
           LOG(`STOP an #${u.n}: zweiter technischer Fehler. Operator entscheidet.`)
         } else {
           queue.push(u)
@@ -278,6 +366,8 @@ const worker = async () => {
       }
     } finally {
       if (u.area) inFlightAreas.delete(u.area)
+      inFlightIssues.delete(u.n)
+      notifyProgress()
     }
   }
 }
@@ -288,7 +378,7 @@ phase('Implement')
 // serverseitiges Gate + Protection ist Auto-Merge nicht zulässig).
 const pre = await agent(`${PRE}PRE-FLIGHT (read-only, KEINE Mutation): 1. Haupt-Tree sauber? git status --porcelain muss leer sein UND git branch --show-current muss ${BRANCH} sein. 2. gh auth status ok? 3. Branch-Protection aktiv? gh api repos/${SLUG}/branches/${BRANCH}/protection (GET ist erlaubt) muss Status 200 liefern und required_status_checks enthalten${C.mergeCheck ? ` (erwartet u. a. "${C.mergeCheck}")` : ''} — 404 heißt: keine Protection, Auto-Merge nicht zulässig. Return { clean, note } — clean nur, wenn alle drei Punkte erfüllt.`, { label: 'preflight', phase: 'Implement', model: 'haiku', schema: PREFLIGHT_SCHEMA })
 if (!pre || pre.clean !== true) {
-  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), failed: [], parallelism: PAR, tokenMode: TOKEN_MODE }
+  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), failed: [], blocked: [], parallelism: PAR, tokenMode: TOKEN_MODE }
 }
 
 if (!queue.length) LOG('flowkit: keine units übergeben — nichts zu tun.')
@@ -298,4 +388,6 @@ if (PAR > 1) {
   await worker()
 }
 
-return { done, stopped, remaining: queue.map((u) => u.n), failed, parallelism: PAR, tokenMode: TOKEN_MODE }
+if (blocked.length) LOG(`flowkit: ${blocked.length} Einheit(en) dauerhaft blockiert (Blocker offen bzw. im Lauf gescheitert): ${JSON.stringify(blocked)}`)
+
+return { done, stopped, remaining: queue.map((u) => u.n), failed, blocked, parallelism: PAR, tokenMode: TOKEN_MODE }

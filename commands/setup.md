@@ -35,7 +35,11 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    anlegen (existiert sie: nur fehlende Felder ergänzen). Werte aus AGENTS.md/README
    ableiten, Unklares im selben AskUserQuestion-Block wie oben klären. Gegen
    `${CLAUDE_PLUGIN_ROOT}/templates/workflow.config.schema.json` validieren (python3 + json,
-   ohne Fremdpakete: Pflichtfelder und Typen manuell prüfen).
+   ohne Fremdpakete: Pflichtfelder und Typen manuell prüfen). Bei einem Update einer
+   bestehenden Config die seit ihrer Anlage dazugekommenen Felder ergänzen —
+   aktuell `respectDependencies` (GitHub-native „blocked by"-Dependencies, Default
+   `true`; braucht `gh` ≥ 2.94 für `--json blockedBy`, `gh --version` prüfen und
+   bei älterer gh den Wert auf `false` setzen plus Hinweis in den Abschlussbericht).
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
    budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6) sowie fehlende
