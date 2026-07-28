@@ -1,6 +1,6 @@
 {
   "name": "flowkit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Universal GitHub-issue-driven agent workflow: AI-groomed backlog, autonomous runner with hard budgets, model tiering, five-layer verification stack.",
   "author": { "name": "jam@ahler.org" }
 }

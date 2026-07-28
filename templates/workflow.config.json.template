@@ -34,6 +34,7 @@
   "markers": { "plan": "<!-- plan:v1 -->", "acVerify": "<!-- ac-verify:v1 -->", "critic": "<!-- critic:v1 -->" },
   "milestoneExcludeRegex": "",
   "excludeLabels": ["type/operator", "type/epic"],
+  "respectDependencies": true,
   "issueLimit": 300,
   "browserProof": false,
   "notify": false,

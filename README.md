@@ -44,6 +44,10 @@ directly — the install arrives as a pull request.
   escalation, then `needs-human` — the run moves on, never loops.
 - **Auto-merge only with active branch protection**; post-merge smoke check with
   a configurable `onSmokeFailure` policy (`revert` by default).
+- **GitHub-native issue dependencies are respected** (`blocked by`, set via
+  `gh issue edit --add-blocked-by`): blockers run first, blocked issues never
+  occupy a slot, and anything that stays blocked is reported instead of retried
+  forever. Set `respectDependencies: false` to opt out.
 - **Verification is enforced structurally, not requested politely:** blocking CI
   gates, a fresh-context AC verifier with a refutation mandate, a cross-vendor
   critic, an independent PR review pipeline and command-level PreToolUse hooks.
