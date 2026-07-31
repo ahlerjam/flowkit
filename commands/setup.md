@@ -68,6 +68,17 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein)
    und gegen die INSTALLIERTE Fassung testen:
    `bash ${CLAUDE_PLUGIN_ROOT}/templates/hooks/test-pretooluse-blocker.sh .claude/hooks/pretooluse-blocker.sh`.
+   Danach **Versions-Stempel:** `PLUGIN_VERSION` aus
+   `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` lesen (jq `-r .version`
+   oder python3 `json.load`). In JEDE gerade nach `.claude/hooks/` kopierte
+   `.sh`-Datei nahe dem Dateianfang (nach der Shebang-Zeile) eine Zeile
+   `# flowkit-template-version: <PLUGIN_VERSION>` einfügen — existiert die
+   Zeile schon (Re-Setup), ERSETZEN statt duplizieren. Zusätzlich die
+   zentrale Stempel-Datei `.claude/flowkit-version` anlegen bzw.
+   überschreiben, Inhalt NUR `<PLUGIN_VERSION>` (eine Zeile, sonst nichts) —
+   sie ist die primäre Drift-Quelle für den SessionStart-Hook
+   (`inject-context.sh`), der sie mit der jeweils installierten
+   Plugin-Version vergleicht.
 5b. **Branch-Protection (Merge-Voraussetzung, Spec §6):** read-only prüfen:
    `gh api repos/$REPO_SLUG/branches/<defaultBranch>/protection` (GET ist erlaubt).
    Bei 404: dem Operator die Einrichtung anleiten (GitHub → Settings → Branches →
@@ -90,6 +101,14 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    oder `"off"`).
    Secrets-Check: `gh secret list` muss CLAUDE_CODE_OAUTH_TOKEN enthalten, sonst
    Operator-Hinweis. Danach `actionlint` auf die erzeugte Datei, falls installiert.
+   **Versions-Stempel:** wie in Schritt 5 `PLUGIN_VERSION` aus
+   `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` lesen und in JEDE gerade
+   kopierte `.yml`-Datei (`.github/workflows/pr-deep-review.yml` sowie die
+   beiden Actions `.github/actions/setup-claude-action/action.yml` und
+   `.github/actions/setup-python-uv/action.yml`) nahe dem Dateianfang die
+   Zeile `# flowkit-template-version: <PLUGIN_VERSION>` einfügen bzw. bei
+   Re-Setup ersetzen. Keine erneute `.claude/flowkit-version` schreiben — die
+   zentrale Stempel-Datei aus Schritt 5 bleibt die einzige.
 6b. **Blockierende Gates (nur wenn das Zielrepo KEINE eigene CI mit Test/Lint/Build
    hat — Repos mit bestehender CI überspringen diesen Punkt):**
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/gates.yml.template` nach `.github/workflows/gates.yml`;

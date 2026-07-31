@@ -16,6 +16,34 @@ BRANCH="$(git -C "$PROJ" branch --show-current 2>/dev/null || echo '?')"
 DIRTY="$(git -C "$PROJ" status --porcelain 2>/dev/null | grep -c . || true)"
 echo "[$NAME] branch=${BRANCH} dirty-files=${DIRTY}"
 
+# --- Template-Versions-Drift -----------------------------------------------
+# Rein lokal, kein Netzzugriff. Vergleicht die beim letzten /flowkit:setup
+# gestempelte Version (.claude/flowkit-version im Projekt) mit der aktuell
+# installierten Plugin-Version (${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json).
+# Jeder Fehlerpfad (Stempel-Datei fehlt, CLAUDE_PLUGIN_ROOT ungesetzt, plugin.json
+# nicht lesbar, kein jq/python3) degradiert lautlos — keine neue Pflicht-
+# Abhängigkeit, notfalls wird die Version per grep/sed aus dem JSON gezogen.
+version_drift() {
+  VFILE="$PROJ/.claude/flowkit-version"
+  [ -f "$VFILE" ] || return 0
+  [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] || return 0
+  PJSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
+  [ -r "$PJSON" ] || return 0
+  INSTALLED="$(head -n 1 "$VFILE" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$INSTALLED" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    PLUGIN_VER="$(jq -r '.version // empty' "$PJSON" 2>/dev/null)"
+  elif command -v python3 >/dev/null 2>&1; then
+    PLUGIN_VER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$PJSON" 2>/dev/null)"
+  else
+    PLUGIN_VER="$(grep -m1 '"version"' "$PJSON" 2>/dev/null | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
+  fi
+  [ -n "$PLUGIN_VER" ] || return 0
+  [ "$INSTALLED" = "$PLUGIN_VER" ] && return 0
+  echo "[flowkit] Templates veraltet: installiert ${INSTALLED}, Plugin ${PLUGIN_VER} -> /flowkit:setup ausführen"
+}
+( version_drift ) 2>/dev/null || true
+
 # --- Gestrandete flowkit-Arbeit -------------------------------------------
 # Kostenbudget: HÖCHSTENS zwei gh-Aufrufe, zusammen ~2s.
 # Entscheidung "ein Aufruf + lokaler Filter" statt zwei Label-Listen:

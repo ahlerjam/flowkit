@@ -15,6 +15,10 @@
 #                                    timeout/gtimeout verfügbar, sonst Skip)
 #   (d) Issue ohne offenen PR      → wird trotzdem gelistet, ohne PR-Angabe
 #   (e) nur needs-human-Treffer    → Hinweis lautet `resume all`
+#   (f) Versionen gleich           → keine Drift-Zeile
+#   (g) Versionen ungleich         → genau eine Drift-Zeile mit beiden Versionen
+#   (h) Stempel-Datei fehlt bzw. CLAUDE_PLUGIN_ROOT ungesetzt → keine
+#                                    Drift-Zeile, keine Fehler
 set -u
 SCRIPT_ARG="${1:-}"
 if [ -n "$SCRIPT_ARG" ]; then
@@ -129,6 +133,59 @@ EOF
     && printf '%s\n' "$OUT" | grep -q '^\[flowkit\] -> /flowkit:implement resume all$'; then ok
   else ko "(e) nur needs-human: erwartet 'resume all', bekam rc=$RC: '$OUT'"; fi
 fi
+
+# --- Fixtures für Template-Versions-Drift (f)/(g)/(h) ---------------------
+# Eigener Minimal-PATH: bash/git/grep/basename/head/sed/tr sind Pflicht (der
+# Fallback-Pfad des Hooks braucht sed/grep, falls jq fehlt); gh bleibt
+# ABWESEND, damit stranded_work sofort abbricht und die Ausgabe für den
+# Drift-Vergleich sauber bleibt. jq nur mit rein, wenn auf dem Testsystem
+# vorhanden (deckt dann den bevorzugten jq-Pfad statt des Fallbacks ab).
+MINBIN2="$WORK/bin-min2"
+mkdir -p "$MINBIN2"
+for t in bash git grep basename head sed tr; do
+  p="$(command -v "$t" 2>/dev/null || true)"
+  [ -n "$p" ] && ln -s "$p" "$MINBIN2/$t"
+done
+[ -n "$JQ_BIN" ] && ln -s "$JQ_BIN" "$MINBIN2/jq"
+
+FAKE_PLUGIN="$WORK/fake-plugin"
+mkdir -p "$FAKE_PLUGIN/.claude-plugin"
+write_plugin_json() {
+  printf '{"name": "flowkit", "version": "%s"}\n' "$1" > "$FAKE_PLUGIN/.claude-plugin/plugin.json"
+}
+mkdir -p "$REPO/.claude"
+# Sobald .claude/flowkit-version im Test-Repo liegt, meldet git eine
+# zusätzliche untracked-Zeile (die leere .claude/-Verzeichnis-Anlage allein
+# zählt nicht) — dafür die Basis-Ausgabe mit dirty-files=1 als Vergleich.
+BASE_DIRTY1="[repo] branch=main dirty-files=1"
+
+# --- (f) Versionen gleich → keine Drift-Zeile -----------------------------
+printf '0.6.0\n' > "$REPO/.claude/flowkit-version"
+write_plugin_json "0.6.0"
+OUT="$(env PATH="$MINBIN2" CLAUDE_PROJECT_DIR="$REPO" CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" bash "$HOOK" </dev/null 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ "$OUT" = "$BASE_DIRTY1" ]; then ok
+else ko "(f) gleiche Versionen: erwartet Basis-Ausgabe ohne Drift-Zeile, bekam rc=$RC: '$OUT'"; fi
+
+# --- (g) Versionen ungleich → genau eine Drift-Zeile mit beiden Versionen -
+printf '0.2.1\n' > "$REPO/.claude/flowkit-version"
+write_plugin_json "0.6.0"
+OUT="$(env PATH="$MINBIN2" CLAUDE_PROJECT_DIR="$REPO" CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" bash "$HOOK" </dev/null 2>&1)"; RC=$?
+DRIFTLINES="$(printf '%s\n' "$OUT" | grep -c '^\[flowkit\] Templates veraltet:')"
+if [ "$RC" -eq 0 ] && [ "$DRIFTLINES" = "1" ] \
+  && printf '%s\n' "$OUT" | grep -qF "[flowkit] Templates veraltet: installiert 0.2.1, Plugin 0.6.0 -> /flowkit:setup ausführen"; then ok
+else ko "(g) ungleiche Versionen: erwartet genau eine Drift-Zeile, bekam rc=$RC: '$OUT'"; fi
+
+# --- (h) Stempel-Datei fehlt bzw. CLAUDE_PLUGIN_ROOT ungesetzt ------------
+rm -f "$REPO/.claude/flowkit-version"
+OUT="$(env PATH="$MINBIN2" CLAUDE_PROJECT_DIR="$REPO" CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" bash "$HOOK" </dev/null 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ "$OUT" = "$BASE" ]; then ok
+else ko "(h1) fehlende Stempel-Datei: erwartet Basis-Ausgabe, bekam rc=$RC: '$OUT'"; fi
+
+printf '0.2.1\n' > "$REPO/.claude/flowkit-version"
+OUT="$(env PATH="$MINBIN2" CLAUDE_PROJECT_DIR="$REPO" CLAUDE_PLUGIN_ROOT="" bash "$HOOK" </dev/null 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ "$OUT" = "$BASE_DIRTY1" ]; then ok
+else ko "(h2) CLAUDE_PLUGIN_ROOT ungesetzt: erwartet Basis-Ausgabe, bekam rc=$RC: '$OUT'"; fi
+rm -f "$REPO/.claude/flowkit-version"
 
 # --- (c) hängender gh-Stub: Hook kehrt in <5s zurück ----------------------
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
