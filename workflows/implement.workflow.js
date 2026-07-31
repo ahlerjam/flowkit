@@ -237,8 +237,16 @@ const runUnit = async (u) => {
   let fixRounds = 0
   const escNow = () => fixRounds >= 2
   const budgetStop = async (stand) => {
-    await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Falls ein offener PR zum Issue existiert (Nummer via gh pr list -R ${SLUG} --search "Closes #${n}" --state open ermitteln): gh pr ready <NUMMER> --undo -R ${SLUG} (auf Draft setzen). 4. ${wtCleanup(n)}`,
-      { label: `budget-abort #${n}`, phase: 'Implement', model: 'haiku' })
+    // Admin-Agent abgesichert (Testsuite-Befund 2026-07-31): wirft der
+    // Haiku-Agent selbst, würde der Fehler den Budget-Abbruch zum technischen
+    // Fehler umklassifizieren und die Einheit trotz gesprengtem Budget
+    // requeuen — das Ergebnis "budgetExceeded" steht aber schon fest.
+    try {
+      await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Falls ein offener PR zum Issue existiert (Nummer via gh pr list -R ${SLUG} --search "Closes #${n}" --state open ermitteln): gh pr ready <NUMMER> --undo -R ${SLUG} (auf Draft setzen). 4. ${wtCleanup(n)}`,
+        { label: `budget-abort #${n}`, phase: 'Implement', model: 'haiku' })
+    } catch (e) {
+      LOG(`#${n} Budget-Abbruch-Agent fehlgeschlagen (Label/Kommentar evtl. nicht gesetzt): ${e && e.message ? e.message : String(e)}`)
+    }
     return { budgetExceeded: true, note: stand }
   }
 
@@ -416,15 +424,27 @@ const worker = async () => {
       }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)
+      // Admin-Agents im Fehlerpfad abgesichert (Testsuite-Befund 2026-07-31):
+      // ungefangen würde ein transienter Ausfall des Haiku-Agents hier den
+      // GESAMTEN Lauf crashen (kein Report, restliche Einheiten laufen nie) —
+      // die Buchführung (unresolved/done/failed) muss auch dann stimmen.
       if (msg.startsWith('GATE:')) {
-        await needsHumanStop(u, msg)
+        try {
+          await needsHumanStop(u, msg)
+        } catch (e2) {
+          LOG(`#${u.n} needs-human-Agent fehlgeschlagen (Label/Draft evtl. nicht gesetzt): ${e2 && e2.message ? e2.message : String(e2)}`)
+        }
         unresolved.add(u.n)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
         LOG(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
       } else {
         failures[u.n] = (failures[u.n] || 0) + 1
         LOG(`#${u.n} technischer Fehler (Versuch ${failures[u.n]}): ${msg}`)
-        await cleanupUnit(u, msg)
+        try {
+          await cleanupUnit(u, msg)
+        } catch (e2) {
+          LOG(`#${u.n} Fehler-Cleanup fehlgeschlagen (Worktree bleibt evtl. liegen): ${e2 && e2.message ? e2.message : String(e2)}`)
+        }
         if (failures[u.n] >= 2) {
           stopped = { issue: u.n, reason: msg }
           failed.push(u.n)

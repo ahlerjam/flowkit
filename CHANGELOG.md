@@ -8,6 +8,50 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-31
+
+### Added
+- Builder mirrors the plan's task checklist into the PR body as `### Tasks`
+  and keeps it growing across fix rounds — reviewers see live progress. (#6)
+- Machine-readable AC verdict: the verifier comment carries a JSON block
+  (`{"verdicts":[{ac,met,evidence}]}`), fix rounds receive the previous
+  verdict, regressions (met → unmet) are called out explicitly; default
+  marker bumped to `<!-- ac-verify:v2 -->` (repos pinning v1 in
+  `markers.acVerify` keep the old wording without regression diffing). (#8)
+- Budget telemetry: `scripts/budget_report.py` aggregates per-issue token
+  spend from `.flowkit/runs/` (delta runs only) into median/p90 per size
+  label plus a config suggestion — never applied automatically. (#7)
+- SessionStart hook lists stranded work (budget-exceeded / needs-human
+  issues with their open PRs) and hints `/flowkit:implement resume`. (#15)
+- Machine-readable config migration list (`templates/config-migrations.json`)
+  consumed by setup; this changelog. (#16)
+- Scheduler core test suite: `node scripts/test-implement-workflow.mjs`,
+  11 cases covering cap coherence, dead blockers, dependency cycles, the
+  WAIT signal and merge-lock serialization, mutation-hardened. (#10)
+
+### Changed
+- Merge-lock split: the gate now waits for green checks OUTSIDE the merge
+  lock; only BEHIND update, conflict handling and the merge itself are
+  serialized — parallel units no longer wait on each other's CI. (#9)
+- pr-deep-review generalized: `criticalPaths` replaces hardcoded
+  source-project paths, `deadCode: auto|on|off` gates the Python-only
+  dead-code job, iac-safety scopes to `iacChangePaths`; gates.yml documents
+  removing the typecheck step when no command is configured. (#11)
+- Prompt-injection hardening: PR/issue context is sanitized and every
+  reviewer prompt declares diff + context as untrusted data. (#12)
+- Gap-scan weekly cap counts only `seed/gap-scan`-labeled issues, not every
+  issue created that week. (#14)
+
+### Fixed
+- Override label is read live by the gate (event snapshot went stale — the
+  label could never unblock a red PR without a new push); label events
+  re-trigger the check cheaply via the review cache. (#13)
+- Admin agents in the runner's failure paths (needs-human, budget abort,
+  error cleanup) are now guarded: a transient agent failure no longer
+  crashes the whole run or re-queues a budget-exceeded unit (found by the
+  new scheduler test suite).
+- Stray `__pycache__` artifacts removed from the repo; `.gitignore` added.
+
 ## [0.5.0] - 2026-07-31
 
 ### Added
