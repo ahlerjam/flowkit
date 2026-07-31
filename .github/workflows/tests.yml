@@ -1,0 +1,87 @@
+name: flowkit-tests
+
+# Dogfooding: flowkit ships CI templates for OTHER repos (templates/ci/*) but
+# had no CI of its own — this runs the plugin's own 6 test suites plus the
+# critical-path pipeline-step tests (scripts/test-review-pipeline-steps.sh) on
+# every PR and every push to main. ubuntu-latest ships node, python3, jq and
+# timeout out of the box, so no setup-* actions are needed.
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: cleanup-worktrees
+        run: bash scripts/test-cleanup-worktrees.sh
+
+      - name: budget_report
+        run: python3 scripts/test_budget_report.py
+
+      - name: implement-workflow
+        run: node scripts/test-implement-workflow.mjs
+
+      - name: inject-context hook
+        run: bash templates/hooks/test-inject-context.sh
+
+      - name: pretooluse-blocker hook
+        run: bash templates/hooks/test-pretooluse-blocker.sh
+
+      - name: review-pipeline-steps (shell-logic of the pr-deep-review template)
+        run: bash scripts/test-review-pipeline-steps.sh
+
+      - name: Validate implement.workflow.js syntax
+        run: |
+          set -euo pipefail
+          # workflows/implement.workflow.js is executed by the engine as an
+          # async function body with `export const meta` (lines 1-5) stripped;
+          # reproduce that wrapping here and let node check the syntax.
+          { echo 'async function _wf() {'; sed '1,5d' workflows/implement.workflow.js; echo '}'; } > /tmp/w.mjs
+          node --check /tmp/w.mjs
+
+      - name: Render + validate pr-deep-review.yml.template as YAML
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          sed \
+            -e 's/{{RUNNER_LABELS}}/ubuntu-latest/g' \
+            -e 's/{{OVERRIDE_LABEL}}/override-claude-review/g' \
+            -e 's/{{MODEL_CODE_REVIEW}}/claude-opus-5/g' \
+            -e 's/{{MODEL_DEAD_CODE}}/claude-sonnet-5/g' \
+            -e 's/{{MODEL_DOC_SYNC}}/claude-sonnet-5/g' \
+            -e 's/{{MODEL_IAC_SAFETY}}/claude-opus-5/g' \
+            -e 's/{{MODEL_VERIFIER}}/claude-opus-5/g' \
+            templates/ci/pr-deep-review.yml.template > /tmp/rendered-pr-deep-review.yml
+          python3 -c "import yaml; yaml.safe_load(open('/tmp/rendered-pr-deep-review.yml')); print('YAML OK')"
+
+      - name: Validate JSON files and templates
+        run: |
+          set -euo pipefail
+          fails=0
+          # *.json.template files may contain a placeholder standing ALONE as a
+          # bare (unquoted) array/object element on its own line (e.g.
+          # templates/settings.json.template's {{STACK_ALLOW}}) — the only
+          # pattern that actually breaks JSON parsing here. Placeholders
+          # embedded inside a string value (e.g. "... {{FORMAT_CMD_PY}} ...")
+          # are harmless plain text and need no substitution.
+          while IFS= read -r f; do
+            rendered="$(sed -E 's/^([[:space:]]*)\{\{[A-Z_]+\}\}(,?)[[:space:]]*$/\1"__placeholder__"\2/' "$f")"
+            if printf '%s' "$rendered" | python3 -m json.tool > /tmp/jsonerr 2>&1; then
+              echo "ok:   $f"
+            else
+              echo "FAIL: $f"
+              cat /tmp/jsonerr
+              fails=$((fails + 1))
+            fi
+          done < <(find templates .claude-plugin -type f \( -name "*.json" -o -name "*.json.template" \) | sort)
+          echo "fails=$fails"
+          [ "$fails" -eq 0 ]
