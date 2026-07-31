@@ -1,0 +1,14 @@
+[
+  {
+    "version": "0.3.0",
+    "field": "respectDependencies",
+    "default": true,
+    "note": "GitHub-native 'blocked by'-Dependencies. Braucht gh >= 2.94 für --json blockedBy: `gh --version` prüfen; bei älterer gh den Wert auf false setzen und einen Hinweis in den Abschlussbericht aufnehmen."
+  },
+  {
+    "version": "0.4.0",
+    "field": "commands.setup",
+    "default": "",
+    "note": "Bootstrap-Kommando für frische Worktrees (z. B. `uv sync --extra dev` oder `npm ci`) — aus README/CI ableiten; gibt es keins, Feld leer lassen oder weglassen."
+  }
+]
