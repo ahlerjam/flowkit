@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Testet die Scheduler-Logik von workflows/implement.workflow.js (pickNext,
 // Cap-Kohärenz, tote Blocker, Zyklus-Erkennung, WAIT-Signal, withMergeLock,
-// Budget-Deckel, needs-human, Stop nach doppeltem technischem Fehler) mit
+// per-Issue-Budget-Deckel, Lauf-Gesamtdeckel inkl. deferredByBudget,
+// Learnings-Station, needs-human, Stop nach doppeltem technischem Fehler) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
 // Harness: die Engine stellt dem Workflow-Script Globals bereit (args, log,
@@ -246,7 +247,10 @@ test('Merge-Lock: gate-merge nie überlappend, gate-wait parallel', async () => 
   assert.equal(report.done.length, 2)
   assert.equal(mergeMax, 1, 'gate-merge lief überlappend — Merge-Lock wirkungslos')
   assert.equal(waitMax, 2, 'gate-wait lief nicht parallel — der Gate-Split (Wait außerhalb des Locks) wirkt nicht')
-  assert.equal(report.tokenMode, 'off', 'bei parallelism 2 muss der Token-Deckel aus sein')
+  // parallelism > 1: kein per-Einheit-Deckel (globales Delta ist nicht attribuierbar),
+  // stattdessen der Lauf-Gesamtdeckel — 'off' gilt nur noch ohne budget-API.
+  assert.equal(report.tokenMode, 'run', 'bei parallelism 2 muss der Lauf-Gesamtdeckel greifen')
+  assert.equal(report.runCap, Math.round((1000000 + 1000000) * 1.2), 'runCap = Σ Einheiten-Budgets × runBudgetFactor')
 })
 
 // 7. Budget-Abbruch: budget.spent() springt nach dem Build über den Deckel —
@@ -269,6 +273,61 @@ test('Budget-Abbruch: budgetExceeded, Abhängiger stirbt, Lauf geht weiter', asy
   assert.deepEqual(report.blocked, [{ n: 2, by: [1] }], 'budgetExceeded ist keine Erledigung — #2 muss sterben')
   assert.equal(doneOf(report, 3).pr, 103, 'unabhängige Einheit #3 muss trotzdem durchlaufen')
   assert.equal(report.stopped, null)
+})
+
+// 7b. Lauf-Gesamtdeckel (parallelism > 1): nach der ersten Einheit ist die Summe
+//     der Einheiten-Budgets × runBudgetFactor überschritten — die zweite Einheit
+//     darf gar nicht mehr anlaufen und landet in deferredByBudget. #2 hängt
+//     bewusst an #1 (blockedBy), sonst hätte der zweite Worker sie schon vor dem
+//     ersten verbrauchten Token gezogen.
+test('Lauf-Gesamtdeckel: zweite Einheit wird nie gestartet, landet in deferredByBudget', async () => {
+  const state = { tokens: 0 }
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg({
+      parallelism: 2,
+      runBudgetFactor: 1.2,
+      budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } },
+    }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => { if (c.label === 'build #1') state.tokens += 5000 },
+  })
+  assert.equal(report.tokenMode, 'run')
+  assert.equal(report.runCap, 2400, 'runCap = (1000 + 1000) × 1.2')
+  // #1 läuft trotz 5000 verbrauchter Tokens regulär durch: bei parallelism > 1 gibt
+  // es KEINEN per-Einheit-Deckel, und der Lauf-Deckel bricht nichts Laufendes ab.
+  assert.equal(doneOf(report, 1).pr, 101)
+  none(calls, /^budget-abort /)
+  assert.deepEqual(report.deferredByBudget, [2])
+  none(calls, /#2\b/)
+  assert.deepEqual(report.remaining, [], 'zurückgestellte Einheiten stehen in deferredByBudget, nicht in remaining')
+  assert.deepEqual(report.blocked, [], 'Budget-Zurückstellung ist keine Blockade')
+  assert.deepEqual(report.failed, [])
+  assert.equal(report.stopped, null, 'der Lauf endet regulär, nicht als Stop')
+  assert.ok(logs.some((l) => /Lauf-Gesamtdeckel überschritten/.test(l)), 'LOG-Meldung zum Lauf-Deckel fehlt')
+})
+
+// 7c. Gegenprobe: unterhalb des Lauf-Deckels läuft alles wie bisher durch.
+test('Lauf-Gesamtdeckel: unterhalb des Deckels wird nichts zurückgestellt', async () => {
+  const state = { tokens: 0 }
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg({ parallelism: 2, budgets: { S: { turns: 20, tokens: 100000 }, M: { turns: 40, tokens: 100000 }, L: { turns: 60, tokens: 100000 } } }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => { if (c.label === 'build #1') state.tokens += 5000 },
+  })
+  assert.deepEqual(report.deferredByBudget, [])
+  assert.equal(report.done.length, 2)
+  assert.equal(report.stopped, null)
+})
+
+// 7d. Fehlkonfiguration darf den Lauf-Deckel nicht STILL abschalten (ein
+//     NaN-Vergleich wäre immer false) — sie muss sofort und laut abbrechen.
+test('runBudgetFactor: unbrauchbarer Wert bricht ab statt still zu deaktivieren', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ runBudgetFactor: 'viel' }) }),
+    /runBudgetFactor muss eine positive Zahl sein/,
+  )
 })
 
 // 8. needs-human-Pfad: GATE-Fehler → needs-human-Agent, Einheit in done mit
@@ -332,6 +391,46 @@ test('Area-Präferenz: zweiter Worker weicht auf fremde Area aus', async () => {
   assert.equal(report.done.length, 3)
   assert.ok(only(calls, 'plan #3').startSeq < only(calls, 'plan #2').startSeq,
     'Worker 2 hätte #3 (area web) vor #2 (area api, in flight) ziehen müssen')
+})
+
+// Zusatz: Learnings-Station läuft NACH dem Post-Merge-Cleanup und ist
+// best-effort — ihr Wurf darf einen gemergten, gh-verifizierten Erfolg nicht in
+// einen Fehler umdeuten (sonst würde die Einheit requeued und alles ein zweites
+// Mal gebaut).
+test('Learnings: Station nach Merge/Cleanup, ihr Fehler kippt den Einheit-Erfolg nicht', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1, { area: 'api' }), unit(2)],
+    config: cfg(),
+    respond: (c) => { if (c.label === 'learnings #1') throw new Error('haiku weg') },
+  })
+  const l1 = only(calls, 'learnings #1')
+  assert.equal(l1.opts.model, 'haiku')
+  assert.ok(only(calls, 'gate-merge #1').endSeq < l1.startSeq, 'Learnings dürfen erst nach dem Merge laufen')
+  assert.ok(only(calls, 'cleanup #1').endSeq < l1.startSeq, 'Learnings laufen NACH dem Post-Merge-Cleanup')
+  assert.ok(/\.flowkit\/learnings\//.test(l1.prompt), 'Zielpfad fehlt im Learnings-Prompt')
+  // Erfolg trotz geworfener Station: kein Requeue, kein needs-human, kein Stop.
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.pr, 101)
+  assert.ok(!d1.needsHuman)
+  assert.equal(find(calls, 'build #1').length, 1, 'ein Wurf der Learnings-Station darf kein Requeue auslösen')
+  assert.equal(report.stopped, null)
+  assert.deepEqual(report.failed, [])
+  assert.equal(doneOf(report, 2).pr, 102)
+  assert.ok(logs.some((l) => /Learnings-Destillat übersprungen/.test(l)), 'LOG zum übersprungenen Destillat fehlt')
+  // Gegenstück: Planner und Builder lesen die jüngsten Destillate, Area zuerst.
+  const p1 = only(calls, 'plan #1')
+  assert.ok(/ls -t \.flowkit\/learnings/.test(p1.prompt), 'Planner liest die Learnings nicht')
+  assert.ok(/area: api/.test(p1.prompt), 'Area-Präferenz fehlt im Planner-Prompt')
+  assert.ok(/ls -t \.flowkit\/learnings/.test(only(calls, 'build #1').prompt), 'Builder liest die Learnings nicht')
+})
+
+// Zusatz: learnings=false schaltet Station UND Lese-Schritt ab (kein halber Zustand).
+test('Learnings: learnings=false schaltet Station und Lese-Schritt ab', async () => {
+  const { report, calls } = await runWorkflow({ units: [unit(1)], config: cfg({ learnings: false }) })
+  assert.equal(doneOf(report, 1).pr, 101)
+  none(calls, /^learnings /)
+  assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'plan #1').prompt))
+  assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'build #1').prompt))
 })
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@
     "L": { "turns": 120, "tokens": 1100000 }
   },
   "opusTurnWeight": 3,
+  "runBudgetFactor": 1.2,
   "models": {
     "grooming": "haiku",
     "planner": { "SM": "sonnet", "L": "opus" },
@@ -36,6 +37,7 @@
   "milestoneExcludeRegex": "",
   "excludeLabels": ["type/operator", "type/epic"],
   "respectDependencies": true,
+  "learnings": true,
   "issueLimit": 300,
   "browserProof": false,
   "notify": false,

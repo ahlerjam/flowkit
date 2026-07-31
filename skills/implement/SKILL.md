@@ -17,8 +17,11 @@ description: Use when a defined scope of this repository should be built autonom
 
 Ein Aufruf, danach keine Rückfrage bis fertig oder Stop. Qualität kommt aus den
 Stationen (frischer AC-Verifier, Critic, Review-Gate), nicht aus Zwischenfragen.
-Jedes Issue hat ein hartes Budget (CONFIG.budgets je size-Label) — Überschreitung
-bricht sauber ab statt weiterzubrennen.
+Jedes Issue hat ein Budget (CONFIG.budgets je size-Label) — Überschreitung bricht
+sauber ab statt weiterzubrennen. Hart je Issue ist dieser Deckel bei
+`parallelism: 1`; bei `parallelism > 1` tritt an seine Stelle ein
+Lauf-Gesamtdeckel (siehe Stop-Regeln), weil der Token-Zähler dort keiner
+einzelnen Einheit zurechenbar ist.
 
 ## Scope auflösen (im Hauptkontext, via gh; REPO_SLUG=CONFIG.repoSlug)
 
@@ -175,6 +178,16 @@ statt still ewig zu blockieren.
 8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).
+9. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
+   destilliert das ÜBERTRAGBARE Wissen der Einheit nach
+   `.flowkit/learnings/<issue>-<slug>.md` — Frontmatter (issue, pr, area, date)
+   plus „Was funktionierte" / „Fallen", zusammen höchstens ~15 Zeilen. Gemeint
+   sind API-Fallen, Test-Ansätze und Eigenheiten dieses Repos, ausdrücklich
+   KEINE Nacherzählung des Issues. Gegenstück: Planner und Builder lesen vorab
+   die 10 jüngsten Dateien aus `.flowkit/learnings/` (`ls -t | head`), die zur
+   eigenen Area zuerst; fehlt das Verzeichnis, laufen sie stillschweigend
+   weiter. Wie der Cleanup läuft die Station in try/catch — ein Fehler beim
+   Aufschreiben kippt einen gemergten Erfolg nie.
 
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 
@@ -188,9 +201,20 @@ statt still ewig zu blockieren.
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall): erster Fehler → Cleanup +
   Queue-Ende (transient); zweiter technischer Fehler derselben Einheit → Lauf
   stoppt mit Bericht.
-- **Budget-Überschreitung** → Einheit sauber abgebrochen (Kommentar, Label
-  `budget-exceeded`, PR auf Draft, Worktree-Cleanup), zählt NICHT als Fehler,
-  Lauf geht weiter.
+- **Budget-Überschreitung je Issue** (nur bei `parallelism: 1` — nur dort ist das
+  Delta von `budget.spent()` einer Einheit zurechenbar) → Einheit sauber
+  abgebrochen (Kommentar, Label `budget-exceeded`, PR auf Draft,
+  Worktree-Cleanup), zählt NICHT als Fehler, Lauf geht weiter.
+- **Lauf-Gesamtdeckel** (bei `parallelism > 1`, `tokenMode: "run"`): Deckel =
+  Summe der Einheiten-Budgets dieses Laufs × `CONFIG.runBudgetFactor` (Default
+  1.2). Ist er überschritten, wird KEINE neue Einheit mehr gestartet; laufende
+  Einheiten laufen normal zu Ende und der Lauf endet regulär mit Bericht. Die
+  nicht mehr gestarteten Einheiten stehen im Bericht unter `deferredByBudget`
+  (nicht in `remaining`, nicht in `blocked`) — kein Fehler, kein Stop, kein
+  Label auf GitHub; sie kommen im nächsten Lauf einfach wieder dran. Eine grobe
+  Näherung mit Absicht: ein per-Issue-Deckel wäre bei parallelen Workern nicht
+  attribuierbar, und laufende Einheiten mittendrin abzubrechen verbrennt mehr,
+  als es spart.
 - **Dauerhaft blockiert** (Blocker außerhalb des Laufs und offen, oder Blocker im
   Lauf gescheitert/abgebrochen, oder Dependency-Zyklus): die Einheit wird EINMAL aus
   der Queue genommen — kein Requeue — und im Lauf-Bericht unter `blocked`
@@ -219,6 +243,16 @@ liefert `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/budget_report.py .flowkit/runs`
 (Median/p90 je size-Label plus Vorschlag für `budgets.<size>.tokens`); der
 Vorschlag wird dem Operator präsentiert und NIE automatisch in die Config
 geschrieben. Der Lauf-Bericht enthält
-Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2). Wenn CONFIG.notify true ist: nach Lauf-Ende
+Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2).
+Verlässliche Kalibrier-Daten liefern NUR Läufe mit `parallelism: 1`
+(`tokenMode: "delta"`); Läufe mit `tokenMode: "run"` haben statt eines
+per-Issue-Deckels nur den Lauf-Gesamtdeckel, ihre `done[].tokens` sind `null`
+und `budget_report.py` überspringt sie. Solange die Budgets nicht kalibriert
+sind, ist auch der Lauf-Gesamtdeckel nur so gut wie sie — im Zweifel
+`runBudgetFactor` großzügig lassen und `deferredByBudget` im Bericht beobachten.
+Neben `runs/` liegt unter `.flowkit/learnings/` das Repo-Gedächtnis (ein
+Destillat je gemergtem Issue, siehe Station 9). Auch dieses Verzeichnis ist über
+`.flowkit/` gitignored und bleibt damit bewusst repo- und maschinenlokal: es
+wird nie committet, nie in einen PR gezogen und nie zwischen Repos geteilt. Wenn CONFIG.notify true ist: nach Lauf-Ende
 den Kurzbericht (erledigt/offen/Stop-Grund) zusätzlich als Push-Benachrichtigung
 senden (PushNotification-Tool, falls in der Session verfügbar; sonst überspringen).
