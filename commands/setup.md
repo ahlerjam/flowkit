@@ -39,7 +39,10 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    bestehenden Config die seit ihrer Anlage dazugekommenen Felder ergänzen —
    aktuell `respectDependencies` (GitHub-native „blocked by"-Dependencies, Default
    `true`; braucht `gh` ≥ 2.94 für `--json blockedBy`, `gh --version` prüfen und
-   bei älterer gh den Wert auf `false` setzen plus Hinweis in den Abschlussbericht).
+   bei älterer gh den Wert auf `false` setzen plus Hinweis in den Abschlussbericht)
+   und `commands.setup` (Bootstrap-Kommando für frische Worktrees, z. B.
+   `uv sync --extra dev` oder `npm ci` — aus README/CI ableiten; gibt es keins,
+   Feld leer lassen oder weglassen).
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
    budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6) sowie fehlende
@@ -79,7 +82,7 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
 6b. **Blockierende Gates (nur wenn das Zielrepo KEINE eigene CI mit Test/Lint/Build
    hat — Repos mit bestehender CI überspringen diesen Punkt):**
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/gates.yml.template` nach `.github/workflows/gates.yml`;
-   Platzhalter ersetzen: {{SETUP_CMD}} = Setup-Kommando aus CONFIG (z. B. "uv sync --extra dev"),
+   Platzhalter ersetzen: {{SETUP_CMD}} = CONFIG.commands.setup (z. B. "uv sync --extra dev"),
    {{TEST_CMD}}/{{LINT_CMD}}/{{TYPECHECK_CMD}} aus CONFIG.commands,
    {{DEFAULT_BRANCH}} aus CONFIG.defaultBranch. Danach `actionlint`, falls installiert.
 7. **.gitignore:** Zeile `.flowkit/` ergänzen.

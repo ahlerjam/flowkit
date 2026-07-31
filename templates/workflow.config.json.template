@@ -3,6 +3,7 @@
   "defaultBranch": "main",
   "pushCommand": "git push",
   "commands": {
+    "setup": "{{SETUP_CMD_OR_EMPTY}}",
     "test": "{{TEST_CMD}}",
     "lint": "{{LINT_CMD}}",
     "typecheck": "{{TYPECHECK_CMD_OR_EMPTY}}",
