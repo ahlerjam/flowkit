@@ -9,7 +9,7 @@
     "pushCommand": { "type": "string", "default": "git push", "description": "z. B. git pushci wenn Local-CI-Gate installiert ist" },
     "commands": {
       "type": "object", "required": ["test", "lint"],
-      "properties": { "test": { "type": "string" }, "lint": { "type": "string" }, "typecheck": { "type": "string" }, "smoke": { "type": "string" } }
+      "properties": { "setup": { "type": "string", "description": "Bootstrap-Kommando für frische Worktrees (Dependencies installieren, z. B. uv sync --extra dev, npm ci); Builder, Fix-Runden und Verifier führen es als Schritt 0 aus, bevor irgendetwas anderes läuft" }, "test": { "type": "string" }, "lint": { "type": "string" }, "typecheck": { "type": "string" }, "smoke": { "type": "string" } }
     },
     "extraGates": { "type": "array", "items": { "type": "string" }, "description": "weitere lokale Gate-Kommandos (OpenAPI-Check, Schema-Drift ...)" },
     "protectedAreas": { "type": "array", "items": { "type": "string" } },

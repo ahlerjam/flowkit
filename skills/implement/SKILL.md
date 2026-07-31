@@ -70,6 +70,21 @@ bricht sauber ab statt weiterzubrennen.
   in der CONFIG schaltet ihn ab (`$deps | not`; `// true` wäre hier falsch, weil jq
   auch `false` als leer behandelt).
   Vor dem ersten Lauf einmal read-only gegen das Repo testen (gefahrlos, nur Lesen).
+- `resume [all] [max X]` → Wiederaufnahme liegengebliebener Arbeit statt Neuanfang:
+  offene Issues mit Label `budget-exceeded` (mit `all` zusätzlich `needs-human`),
+  zu denen ein OFFENER PR existiert (`gh pr list -R "$REPO_SLUG" --search
+  "Closes #<N>" --state open`, Treffer gegen den PR-Body verifizieren — die
+  Volltextsuche kann auch `#<N>XX` liefern). Je Treffer VOR dem Lauf:
+  `gh issue edit <N> -R "$REPO_SLUG" --remove-label budget-exceeded
+  --remove-label needs-human --add-label agent-ready`. Der Builder übernimmt den
+  bestehenden PR über seinen Idempotenz-Schritt (Branch weiterführen, Draft
+  wieder ready setzen) — Code und bereits gefundene Fehler werden nicht ein
+  zweites Mal erarbeitet. Das Budget zählt im Resume-Lauf frisch. Ohne `all`
+  bleiben `needs-human`-Issues bewusst liegen: dieses Label heißt, ein Mensch
+  muss erst den gemeldeten Blocker (letzter Issue-Kommentar) entscheiden;
+  `resume all` ist die explizite Operator-Zustimmung, es trotzdem erneut zu
+  versuchen. Issues mit diesen Labels, aber OHNE offenen PR, gehören nicht in
+  den Resume-Scope (nichts zum Aufsetzen) — sie im Abschlussbericht ausweisen.
 - `max <X>` → harte Obergrenze der Einheiten für diesen Lauf.
 - `gaps <Bereich> [max X]` → flowkit:issue im gaps-Modus aufrufen, dann die neu
   angelegten `agent-ready`-Issues abarbeiten. Mit explizitem `max` vollautonom;
@@ -114,8 +129,14 @@ offene Blocker aus der Karte oben (leeres Array, wenn keine).
 
     Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/implement.workflow.js",
                args: { config: <CONFIG als Objekt>,
+                       pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
                        units: [{ n: 123, lane: "full", size: "M", area: "backend",
                                  blockedBy: [] }, ...] } })
+
+`pluginRoot` schaltet das deterministische Worktree-Cleanup frei
+(`scripts/cleanup-worktrees.sh` im Plugin — die Auswahl, was entfernt werden
+darf, trifft ein Script statt eines Agenten); fehlt es, fallen die
+Cleanup-Stationen auf die Prompt-Regel zurück.
 
 `blockedBy` darf fehlen (dann gilt die Einheit als unblockiert) und enthält
 ausschließlich Issue-Nummern (Integer) — ein anderer Typ bricht den Lauf sofort ab,
@@ -170,8 +191,15 @@ statt still ewig zu blockieren.
 ## Ground Truth und Resume
 
 „gemergt/grün/erledigt" gilt nur nach gh-Verifikation, nie aus Agent-JSON. Nach
-Abbruch: denselben Workflow mit `resumeFromRunId` starten — erledigte Einheiten
-kommen aus dem Cache. Der Lauf-Bericht enthält Token-Verbrauch je Issue (Datenbasis
-für die Budget-Kalibrierung in Stufe 2). Wenn CONFIG.notify true ist: nach Lauf-Ende
+Abbruch in derselben Session: denselben Workflow mit `resumeFromRunId` starten —
+erledigte Einheiten kommen aus dem Cache. Über Session-Grenzen hinweg ist der
+Scope-Modus `resume` der Weg zurück zu liegengebliebener Arbeit.
+Nach JEDEM Lauf-Ende den Lauf-Bericht persistieren:
+`.flowkit/runs/<YYYY-MM-DDTHH-MM>-<scope>.json` — Inhalt: das Return-Objekt des
+Workflows plus `scope` (der aufgelöste Auftrag) und `startedAt`. `.flowkit/` ist
+gitignored; diese Dateien sind die dauerhafte Datenbasis für die
+Budget-Kalibrierung (Token je size-Label, nur Läufe mit `tokenMode: "delta"`)
+und das Aufwärm-Material für spätere Sessions. Der Lauf-Bericht enthält
+Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2). Wenn CONFIG.notify true ist: nach Lauf-Ende
 den Kurzbericht (erledigt/offen/Stop-Grund) zusätzlich als Push-Benachrichtigung
 senden (PushNotification-Tool, falls in der Session verfügbar; sonst überspringen).
