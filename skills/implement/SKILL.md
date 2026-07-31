@@ -151,7 +151,10 @@ statt still ewig zu blockieren.
    (erledigt = abgehakt; ohne Plan entfällt der Abschnitt; Fix-Runden hängen ihre
    Punkte abgehakt an, die Liste wird nie gekürzt). Merged nie selbst.
 3. **AC-Verifier:** frisch, Input nur Issue-Body + PR-Diff, Widerlegungsauftrag,
-   Urteil als PR-Kommentar `<!-- ac-verify:v1 -->`.
+   Urteil als PR-Kommentar `<!-- ac-verify:v2 -->` — Tabelle plus maschinenlesbarer
+   JSON-Block `{"verdicts":[{"ac","met","evidence"}]}`, ein Eintrag je AC.
+   Folgerunden lesen den vorherigen Block, die Fix-Runde erhält das vorherige
+   Verdict, und jede Regression (met → unmet) wird explizit ausgewiesen.
 4. **Critic** (wenn CONFIG.critic.enabled): Cross-Vendor-Review via flowkit:critic,
    P0/P1 blocken.
 5. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener

@@ -32,7 +32,7 @@
   "maxFixRounds": 3,
   "mergeCheck": "coordinator",
   "overrideLabel": "override-claude-review",
-  "markers": { "plan": "<!-- plan:v1 -->", "acVerify": "<!-- ac-verify:v1 -->", "critic": "<!-- critic:v1 -->" },
+  "markers": { "plan": "<!-- plan:v1 -->", "acVerify": "<!-- ac-verify:v2 -->", "critic": "<!-- critic:v1 -->" },
   "milestoneExcludeRegex": "",
   "excludeLabels": ["type/operator", "type/epic"],
   "respectDependencies": true,

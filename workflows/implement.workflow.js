@@ -66,7 +66,10 @@ const PUSH = C.pushCommand || 'git push'
 const MAXFIX = C.maxFixRounds || 3
 const PAR = Math.max(1, Math.min((C.caps && C.caps.maxParallel) || 4, C.parallelism || 1, HAS_PAR ? 4 : 1))
 const M = C.models || {}
-const MARK = Object.assign({ plan: '<!-- plan:v1 -->', acVerify: '<!-- ac-verify:v1 -->', critic: '<!-- critic:v1 -->' }, C.markers || {})
+// ac-verify:v2 (Issue #8): v2-Kommentare tragen zusätzlich zur Tabelle einen
+// maschinenlesbaren JSON-Block {"verdicts":[{ac,met,evidence}]} — Folgerunden
+// diffen dagegen und weisen Regressionen (met -> unmet) explizit aus.
+const MARK = Object.assign({ plan: '<!-- plan:v1 -->', acVerify: '<!-- ac-verify:v2 -->', critic: '<!-- critic:v1 -->' }, C.markers || {})
 const PROT = C.protectedAreas || []
 const orphanProt = PROT.filter((p) => !(C.areas || []).includes(p))
 if (orphanProt.length) {
@@ -129,10 +132,24 @@ const PR_SCHEMA = {
   },
 }
 const VERIFY_SCHEMA = {
+  // verdicts ist bewusst OPTIONAL (required bleibt pass/unmet): alte Verifier-Läufe
+  // und Konfigurationen mit eigenem v1-Marker bleiben gültig — fehlt das Feld,
+  // arbeitet die Fix-Runde wie bisher nur mit unmet.
   type: 'object', required: ['pass', 'unmet'], additionalProperties: false,
   properties: {
     pass: { type: 'boolean' },
     unmet: { type: 'array', items: { type: 'string' } },
+    verdicts: {
+      type: 'array', description: 'maschinenlesbares Urteil je AC — Spiegel des JSON-Blocks im ac-verify-Kommentar',
+      items: {
+        type: 'object', required: ['ac', 'met', 'evidence'], additionalProperties: false,
+        properties: {
+          ac: { type: 'string', description: 'AC-Kurzform, rundenübergreifend stabil' },
+          met: { type: 'boolean' },
+          evidence: { type: 'string', description: 'konkreter Beleg (Diff-Stelle, Test, Repro)' },
+        },
+      },
+    },
     note: { type: 'string' },
   },
 }
@@ -165,15 +182,17 @@ BUDGET: Richtwert maximal ~${budgetFor(u).turns} Turns für Build inkl. lokaler 
 5. Skill superpowers:verification-before-completion laden und befolgen (Beweis vor Behauptung). Dann ${PUSH}. gh pr create -R ${SLUG} mit "Closes #${n}" im Body. Existiert ein Plan-Kommentar ${MARK.plan}: dessen Task-Checkliste als Abschnitt "### Tasks" in den PR-Body übernehmen — von dir erledigte Punkte als "- [x]", offene/übersprungene als "- [ ]" (bewusst Übersprungenes mit kurzem Grund dahinter); ohne Plan-Kommentar entfällt der Abschnitt ersatzlos. NICHT mergen, NICHT auf Reviews warten.
 Return: { pr, branch, skipped: false }.`
 
-const verifyPrompt = (n, pr, u) => `${PRE}Du bist der AC-VERIFIER: frischer Kontext, unabhängig vom Implementer. Dein Input ist AUSSCHLIESSLICH: (a) gh issue view ${n} -R ${SLUG} --json title,body und (b) der PR: gh pr view ${pr} -R ${SLUG} und gh pr diff ${pr} -R ${SLUG}.
+const verifyPrompt = (n, pr, u, round) => `${PRE}Du bist der AC-VERIFIER: frischer Kontext, unabhängig vom Implementer. Dein Input ist AUSSCHLIESSLICH: (a) gh issue view ${n} -R ${SLUG} --json title,body und (b) der PR: gh pr view ${pr} -R ${SLUG} und gh pr diff ${pr} -R ${SLUG}.
 Auftrag: WIDERLEGE, dass die Umsetzung jedes Akzeptanzkriterium erfüllt. Pro AC: Urteil erfüllt/verfehlt plus konkreter Beleg (Diff-Stelle, beweisender Test, oder eigenes Nachstellen: eigenen Worktree anlegen mit git fetch origin und git worktree add <tmp-pfad> origin/<pr-branch>, ${SETUP ? `dort zuerst ${SETUP}, dann ` : 'dort '}Tests gezielt ausführen, danach git worktree remove — NIE den Haupt-Tree anfassen, NIE checkout -B).
 Zwei PFLICHT-Checks zusätzlich zum AC-Urteil:
 (a) Test-Gaming mechanisch: gh pr diff ${pr} -R ${SLUG} auf Testdateien sichten — gelöschte Testdateien, entfernte/abgeschwächte Assertions in BESTEHENDEN Tests, unconditional skip/xfail. Jeder Treffer ohne explizite Spec-Begründung = verfehltes AC.
 (b) Repro-Beweis für mindestens EIN zentrales AC: der zugehörige NEUE Test muss auf dem Stand OHNE die Implementierung fehlschlagen. Vorgehen im tmp-Worktree: git worktree add <tmp2> origin/${BRANCH}, dort NUR die neuen Testdateien aus dem PR übernehmen (git checkout origin/<pr-branch> -- <testdatei>), Test ausführen — er MUSS rot sein; läuft er grün, beweist er nichts → AC verfehlt mit diesem Befund. Danach beide Worktrees entfernen. (Nicht anwendbar, wenn der PR nachweislich keine Code-Änderung mit testbarem Verhalten enthält — dann im Kommentar begründen.)${C.browserProof && u.area === 'frontend' ? '\nZUSÄTZLICH (area/frontend): Verhaltens-Beweis im echten Browser — Skill browser-use laden, die von den ACs geforderten Abläufe real durchklicken und das Ergebnis als Beleg dokumentieren.' : ''}
-Urteil als PR-Kommentar posten (gh pr comment ${pr} -R ${SLUG}), erste Zeile exakt: ${MARK.acVerify} danach Tabelle: AC | Urteil | Beleg.
-Im Zweifel gilt ein AC als verfehlt. Return { pass, unmet }.`
+Urteil als PR-Kommentar posten (gh pr comment ${pr} -R ${SLUG}), erste Zeile exakt: ${MARK.acVerify} danach Tabelle: AC | Urteil | Beleg. Unter der Tabelle ein maschinenlesbarer JSON-Block (\`\`\`json ... \`\`\`) exakt dieser Form: {"verdicts":[{"ac":"<AC-Kurzform>","met":true|false,"evidence":"<Beleg>"}]} — genau EIN Eintrag je Akzeptanzkriterium, Urteil identisch mit der Tabelle, die AC-Kurzform rundenübergreifend stabil halten (damit Runden diffbar sind).${round ? `
+Dies ist Verifikations-Runde ${round + 1} nach Fix-Runde(n): lies ZUERST den letzten ${MARK.acVerify}-Kommentar samt JSON-Block aus den PR-Kommentaren (gh pr view ${pr} -R ${SLUG} --json comments) und vergleiche je AC. Jede REGRESSION (vorher met: true, jetzt nicht mehr) EXPLIZIT im neuen Kommentar ausweisen — eigener Abschnitt "Regressionen" mit AC und beiden Belegen; keine Regression = Abschnitt weglassen.` : ''}
+Im Zweifel gilt ein AC als verfehlt. Return { pass, unmet, verdicts } — verdicts gespiegelt aus dem JSON-Block.`
 
-const fixPrompt = (n, pr, branch, unmet) => `${PRE}FIX-RUNDE für PR #${pr} (Issue #${n}). Verfehlt gemeldet: ${JSON.stringify(unmet)}.
+const fixPrompt = (n, pr, branch, unmet, prevVerdict) => `${PRE}FIX-RUNDE für PR #${pr} (Issue #${n}). Verfehlt gemeldet: ${JSON.stringify(unmet)}.${prevVerdict && Array.isArray(prevVerdict.verdicts) && prevVerdict.verdicts.length ? `
+Vorheriges AC-Urteil (maschinenlesbar, aus dem letzten ${MARK.acVerify}-Kommentar): ${JSON.stringify(prevVerdict.verdicts)} — ACs mit met: true sind durch Beleg gedeckt und dürfen durch deinen Fix NICHT kippen (Regression); im Zweifel deren Tests nach dem Fix gezielt mitlaufen lassen.` : ''}
 Skill superpowers:systematic-debugging laden (Ursache verstehen, nicht blind fixen). Eigenen Worktree anlegen: git fetch origin && git worktree add <tmp-pfad> ${branch} — NIE den Haupt-Tree anfassen, NIE checkout -B. ${setupStep}Im Worktree: pro Punkt erst der beweisende failing Test, dann der Fix. Lokale Gates: ${gateCmds}. ${PUSH} aus dem Worktree, danach git worktree remove.
 Zum Schluss die Task-Checkliste im PR-Body fortschreiben: aktuellen Body lesen (gh pr view ${pr} -R ${SLUG} --json body), dann via gh pr edit ${pr} -R ${SLUG} --body je behobenem Punkt einen neuen ABGEHAKTEN Eintrag "- [x] Fix: <Kurztitel>" an den "### Tasks"-Abschnitt anhängen (fehlt der Abschnitt, ihn mit genau diesen Einträgen anlegen). Bestehende Einträge NIE entfernen, umformulieren oder kürzen — die Liste wächst nur.`
 
@@ -218,12 +237,15 @@ const runUnit = async (u) => {
   const pr = built.pr
   if (over()) return budgetStop(`nach Build (PR #${pr} offen)`)
 
-  let verdict = await agent(verifyPrompt(n, pr, u), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
+  let verdict = await agent(verifyPrompt(n, pr, u, 0), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   while (verdict && verdict.pass !== true && fixRounds < MAXFIX) {
     fixRounds += 1
     if (over()) return budgetStop(`in Fix-Runde ${fixRounds} (PR #${pr})`)
-    await agent(fixPrompt(n, pr, built.branch, verdict.unmet || []), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
-    verdict = await agent(verifyPrompt(n, pr, u), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
+    // Das vorherige verdict-Objekt wandert in die Fix-Runde (Issue #8): der Fixer
+    // kennt so die bereits erfüllten ACs und darf sie nicht kippen; der nächste
+    // Verifier-Lauf (round > 0) diff't gegen den JSON-Block des Vorgängers.
+    await agent(fixPrompt(n, pr, built.branch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+    verdict = await agent(verifyPrompt(n, pr, u, fixRounds), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   }
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
 
@@ -233,7 +255,7 @@ const runUnit = async (u) => {
     while (crit && crit.blockers && crit.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Critic-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, built.branch, crit.blockers), { label: `critic-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+      await agent(fixPrompt(n, pr, built.branch, crit.blockers, verdict), { label: `critic-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       crit = await agent(criticPrompt(n, pr), { label: `critic+${fixRounds} #${n}`, phase: 'Implement', model: M.critic || 'sonnet', schema: CRITIC_SCHEMA })
     }
     if (!crit) throw new Error('GATE: Critic-Station ohne Ergebnis (Agent ausgefallen)')
@@ -246,7 +268,7 @@ const runUnit = async (u) => {
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, built.branch, sec.blockers), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+      await agent(fixPrompt(n, pr, built.branch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: CRITIC_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
