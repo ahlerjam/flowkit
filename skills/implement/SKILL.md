@@ -147,7 +147,9 @@ statt still ewig zu blockieren.
 1. **Planner** (nur full): frisch, read-only, postet Plan als Issue-Kommentar `<!-- plan:v1 -->`.
 2. **Builder:** eigener Worktree, TDD (Skill superpowers:test-driven-development),
    lokale Gates aus CONFIG.commands + CONFIG.extraGates, Push via CONFIG.pushCommand,
-   PR mit `Closes #N`. Merged nie selbst.
+   PR mit `Closes #N` und der Task-Checkliste des Plans als `### Tasks` im PR-Body
+   (erledigt = abgehakt; ohne Plan entfällt der Abschnitt; Fix-Runden hängen ihre
+   Punkte abgehakt an, die Liste wird nie gekürzt). Merged nie selbst.
 3. **AC-Verifier:** frisch, Input nur Issue-Body + PR-Diff, Widerlegungsauftrag,
    Urteil als PR-Kommentar `<!-- ac-verify:v1 -->`.
 4. **Critic** (wenn CONFIG.critic.enabled): Cross-Vendor-Review via flowkit:critic,
