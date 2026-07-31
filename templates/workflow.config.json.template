@@ -37,6 +37,7 @@
   "milestoneExcludeRegex": "",
   "excludeLabels": ["type/operator", "type/epic"],
   "respectDependencies": true,
+  "learnings": true,
   "issueLimit": 300,
   "browserProof": false,
   "notify": false,

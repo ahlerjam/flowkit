@@ -178,6 +178,16 @@ statt still ewig zu blockieren.
 8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).
+9. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
+   destilliert das ÜBERTRAGBARE Wissen der Einheit nach
+   `.flowkit/learnings/<issue>-<slug>.md` — Frontmatter (issue, pr, area, date)
+   plus „Was funktionierte" / „Fallen", zusammen höchstens ~15 Zeilen. Gemeint
+   sind API-Fallen, Test-Ansätze und Eigenheiten dieses Repos, ausdrücklich
+   KEINE Nacherzählung des Issues. Gegenstück: Planner und Builder lesen vorab
+   die 10 jüngsten Dateien aus `.flowkit/learnings/` (`ls -t | head`), die zur
+   eigenen Area zuerst; fehlt das Verzeichnis, laufen sie stillschweigend
+   weiter. Wie der Cleanup läuft die Station in try/catch — ein Fehler beim
+   Aufschreiben kippt einen gemergten Erfolg nie.
 
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 
@@ -233,6 +243,16 @@ liefert `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/budget_report.py .flowkit/runs`
 (Median/p90 je size-Label plus Vorschlag für `budgets.<size>.tokens`); der
 Vorschlag wird dem Operator präsentiert und NIE automatisch in die Config
 geschrieben. Der Lauf-Bericht enthält
-Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2). Wenn CONFIG.notify true ist: nach Lauf-Ende
+Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2).
+Verlässliche Kalibrier-Daten liefern NUR Läufe mit `parallelism: 1`
+(`tokenMode: "delta"`); Läufe mit `tokenMode: "run"` haben statt eines
+per-Issue-Deckels nur den Lauf-Gesamtdeckel, ihre `done[].tokens` sind `null`
+und `budget_report.py` überspringt sie. Solange die Budgets nicht kalibriert
+sind, ist auch der Lauf-Gesamtdeckel nur so gut wie sie — im Zweifel
+`runBudgetFactor` großzügig lassen und `deferredByBudget` im Bericht beobachten.
+Neben `runs/` liegt unter `.flowkit/learnings/` das Repo-Gedächtnis (ein
+Destillat je gemergtem Issue, siehe Station 9). Auch dieses Verzeichnis ist über
+`.flowkit/` gitignored und bleibt damit bewusst repo- und maschinenlokal: es
+wird nie committet, nie in einen PR gezogen und nie zwischen Repos geteilt. Wenn CONFIG.notify true ist: nach Lauf-Ende
 den Kurzbericht (erledigt/offen/Stop-Grund) zusätzlich als Push-Benachrichtigung
 senden (PushNotification-Tool, falls in der Session verfügbar; sonst überspringen).

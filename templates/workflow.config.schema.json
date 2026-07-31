@@ -42,6 +42,7 @@
     "milestoneExcludeRegex": { "type": "string" },
     "excludeLabels": { "type": "array", "items": { "type": "string" } },
     "respectDependencies": { "type": "boolean", "default": true, "description": "GitHub-native Issue-Dependencies (blocked by) berücksichtigen: blockierte Issues fallen aus der next-Auswahl, innerhalb eines Laufs läuft der Blocker zuerst. false = Dependencies ignorieren (Reihenfolge wie vor 0.3.0)" },
+    "learnings": { "type": "boolean", "default": true, "description": "Wissens-Kompounding: nach jedem gemergten Issue destilliert eine best-effort-Station das übertragbare Wissen nach .flowkit/learnings/<issue>-<slug>.md (repo-lokal, gitignored); Planner und Builder lesen die 10 jüngsten Destillate vorab. false = beides aus" },
     "issueLimit": { "type": "integer", "default": 300 },
     "browserProof": { "type": "boolean", "default": false },
     "notify": { "type": "boolean", "default": false },

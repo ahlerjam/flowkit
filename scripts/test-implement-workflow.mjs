@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Testet die Scheduler-Logik von workflows/implement.workflow.js (pickNext,
 // Cap-Kohärenz, tote Blocker, Zyklus-Erkennung, WAIT-Signal, withMergeLock,
-// Budget-Deckel, needs-human, Stop nach doppeltem technischem Fehler) mit
+// per-Issue-Budget-Deckel, Lauf-Gesamtdeckel inkl. deferredByBudget,
+// Learnings-Station, needs-human, Stop nach doppeltem technischem Fehler) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
 // Harness: die Engine stellt dem Workflow-Script Globals bereit (args, log,
@@ -390,6 +391,46 @@ test('Area-Präferenz: zweiter Worker weicht auf fremde Area aus', async () => {
   assert.equal(report.done.length, 3)
   assert.ok(only(calls, 'plan #3').startSeq < only(calls, 'plan #2').startSeq,
     'Worker 2 hätte #3 (area web) vor #2 (area api, in flight) ziehen müssen')
+})
+
+// Zusatz: Learnings-Station läuft NACH dem Post-Merge-Cleanup und ist
+// best-effort — ihr Wurf darf einen gemergten, gh-verifizierten Erfolg nicht in
+// einen Fehler umdeuten (sonst würde die Einheit requeued und alles ein zweites
+// Mal gebaut).
+test('Learnings: Station nach Merge/Cleanup, ihr Fehler kippt den Einheit-Erfolg nicht', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1, { area: 'api' }), unit(2)],
+    config: cfg(),
+    respond: (c) => { if (c.label === 'learnings #1') throw new Error('haiku weg') },
+  })
+  const l1 = only(calls, 'learnings #1')
+  assert.equal(l1.opts.model, 'haiku')
+  assert.ok(only(calls, 'gate-merge #1').endSeq < l1.startSeq, 'Learnings dürfen erst nach dem Merge laufen')
+  assert.ok(only(calls, 'cleanup #1').endSeq < l1.startSeq, 'Learnings laufen NACH dem Post-Merge-Cleanup')
+  assert.ok(/\.flowkit\/learnings\//.test(l1.prompt), 'Zielpfad fehlt im Learnings-Prompt')
+  // Erfolg trotz geworfener Station: kein Requeue, kein needs-human, kein Stop.
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.pr, 101)
+  assert.ok(!d1.needsHuman)
+  assert.equal(find(calls, 'build #1').length, 1, 'ein Wurf der Learnings-Station darf kein Requeue auslösen')
+  assert.equal(report.stopped, null)
+  assert.deepEqual(report.failed, [])
+  assert.equal(doneOf(report, 2).pr, 102)
+  assert.ok(logs.some((l) => /Learnings-Destillat übersprungen/.test(l)), 'LOG zum übersprungenen Destillat fehlt')
+  // Gegenstück: Planner und Builder lesen die jüngsten Destillate, Area zuerst.
+  const p1 = only(calls, 'plan #1')
+  assert.ok(/ls -t \.flowkit\/learnings/.test(p1.prompt), 'Planner liest die Learnings nicht')
+  assert.ok(/area: api/.test(p1.prompt), 'Area-Präferenz fehlt im Planner-Prompt')
+  assert.ok(/ls -t \.flowkit\/learnings/.test(only(calls, 'build #1').prompt), 'Builder liest die Learnings nicht')
+})
+
+// Zusatz: learnings=false schaltet Station UND Lese-Schritt ab (kein halber Zustand).
+test('Learnings: learnings=false schaltet Station und Lese-Schritt ab', async () => {
+  const { report, calls } = await runWorkflow({ units: [unit(1)], config: cfg({ learnings: false }) })
+  assert.equal(doneOf(report, 1).pr, 101)
+  none(calls, /^learnings /)
+  assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'plan #1').prompt))
+  assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'build #1').prompt))
 })
 
 // ---------------------------------------------------------------------------

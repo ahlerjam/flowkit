@@ -10,5 +10,17 @@
     "field": "commands.setup",
     "default": "",
     "note": "Bootstrap-Kommando für frische Worktrees (z. B. `uv sync --extra dev` oder `npm ci`) — aus README/CI ableiten; gibt es keins, Feld leer lassen oder weglassen."
+  },
+  {
+    "version": "0.7.0",
+    "field": "learnings",
+    "default": true,
+    "note": "Wissens-Kompounding: Destillat je gemergtem Issue nach `.flowkit/learnings/`, Planner/Builder lesen die 10 jüngsten vorab. `.flowkit/` muss in der .gitignore stehen (steht sie seit /flowkit:setup dort). false schaltet Station und Lese-Schritt ab."
+  },
+  {
+    "version": "0.7.0",
+    "field": "runBudgetFactor",
+    "default": 1.2,
+    "note": "Reserve-Faktor des Lauf-Gesamtdeckels bei parallelism > 1 (Deckel = Σ Einheiten-Budgets × Faktor). Bei parallelism 1 wirkungslos. Muss eine positive Zahl sein — ein String bricht den Lauf sofort ab, statt den Deckel still zu deaktivieren."
   }
 ]
