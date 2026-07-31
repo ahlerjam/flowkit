@@ -81,6 +81,13 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    (`${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-claude-action`,
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-python-uv`) nach `.github/actions/`.
    Platzhalter aus `.github/flowkit-review.json` (aus Template anlegen) ersetzen.
+   Neue Config-Keys mit dem Operator klären: `criticalPaths` (Array von
+   Pfad-Präfixen, deren Änderungen die Reviewer auf P1 eskalieren — z. B.
+   Produktions-Endpunkte oder Datenmodelle; leeres Array = keine pfadbasierte
+   Eskalation) und `deadCode` (`"auto"` = Default, dead-code-Job läuft nur bei
+   Python-Markern im Repo-Root (pyproject.toml/setup.py/setup.cfg); `"on"` /
+   `"off"` erzwingen bzw. deaktivieren ihn — für Nicht-Python-Repos `"auto"`
+   oder `"off"`).
    Secrets-Check: `gh secret list` muss CLAUDE_CODE_OAUTH_TOKEN enthalten, sonst
    Operator-Hinweis. Danach `actionlint` auf die erzeugte Datei, falls installiert.
 6b. **Blockierende Gates (nur wenn das Zielrepo KEINE eigene CI mit Test/Lint/Build
@@ -88,7 +95,10 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/gates.yml.template` nach `.github/workflows/gates.yml`;
    Platzhalter ersetzen: {{SETUP_CMD}} = CONFIG.commands.setup (z. B. "uv sync --extra dev"),
    {{TEST_CMD}}/{{LINT_CMD}}/{{TYPECHECK_CMD}} aus CONFIG.commands,
-   {{DEFAULT_BRANCH}} aus CONFIG.defaultBranch. Danach `actionlint`, falls installiert.
+   {{DEFAULT_BRANCH}} aus CONFIG.defaultBranch. Ist CONFIG.commands.typecheck
+   leer, den Typecheck-Step (`- name: Typecheck (blocking)` samt `run:`-Zeile)
+   ersatzlos ENTFERNEN — ein leerer `run:` wäre ein kaputter Pflicht-Step, der
+   jeden Merge blockiert. Danach `actionlint`, falls installiert.
 7. **.gitignore:** Zeile `.flowkit/` ergänzen.
 8. **Abschlussbericht:** was angelegt/geändert/übersprungen wurde, als Chat-Ausgabe;
    Änderungen im Zielrepo als Branch + PR (Titel "chore: install flowkit"), NICHT

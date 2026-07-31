@@ -4,5 +4,7 @@
   "apiChangePaths": [],
   "iacChangePaths": [],
   "deadCodePaths": [],
+  "criticalPaths": [],
+  "deadCode": "auto",
   "docSyncMap": []
 }
