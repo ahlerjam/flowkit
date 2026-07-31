@@ -2,8 +2,12 @@ name: flowkit-pr-deep-review
 
 on:
   # NOTE: no paths: filter — a required status check must always run, otherwise merges block forever on doc-only PRs.
+  # labeled/unlabeled: re-run the gate when the override label changes so the
+  # escape hatch works without a new push. prep's `if` skips every label event
+  # that does not concern the override label, and the review cache makes the
+  # re-run cheap (the diff is unchanged on a pure label event).
   pull_request:
-    types: [opened, synchronize, ready_for_review]
+    types: [opened, synchronize, ready_for_review, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -13,14 +17,23 @@ permissions:
   actions: read  # lets claude-code-action's github_ci MCP server read CI status
 
 concurrency:
-  group: flowkit-pr-deep-review-${{ github.event.pull_request.number }}
+  # Label events that do NOT concern the override label go into their own
+  # no-op group — otherwise adding e.g. a size/priority label mid-review would
+  # cancel the in-progress review run and leave the PR without a verdict.
+  group: flowkit-pr-deep-review-${{ github.event.pull_request.number }}-${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != '{{OVERRIDE_LABEL}}') && 'label-noop' || 'review' }}
   cancel-in-progress: true
 
 jobs:
   prep:
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 3
-    if: github.event.pull_request.draft == false
+    # Skip label events that do not touch the override label — size/priority
+    # labels must not trigger review runs. (Skipped jobs satisfy a required
+    # status check, so this early exit never blocks the merge queue.)
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled' ||
+       github.event.label.name == '{{OVERRIDE_LABEL}}')
     outputs:
       has_api_changes: ${{ steps.detect.outputs.has_api_changes }}
       has_iac_changes: ${{ steps.detect.outputs.has_iac_changes }}
@@ -729,11 +742,32 @@ jobs:
 
       - name: Enforce gate policy
         env:
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
           RUNNER_TEMP: ${{ runner.temp }}
           GITHUB_ACTOR: ${{ github.actor }}
           FLOWKIT_OVERRIDE_LABEL: {{OVERRIDE_LABEL}}
         run: |
+          set -euo pipefail
+          # Fetch labels LIVE — the event snapshot
+          # (github.event.pull_request.labels) goes stale: a label set after
+          # the triggering event (or before a manual re-run) stays invisible
+          # there, so the override could never unblock a red PR without a push.
+          PR_LABELS="$(gh pr view "$PR" --repo "$REPO" --json labels \
+            --jq '[.labels[].name] | join(",")')"
+          # The gate warning must name whoever actually SET the override label
+          # (the triggering event's actor may be someone else, e.g. the
+          # pusher). Best-effort lookup via the issue timeline; falls back to
+          # the workflow actor.
+          if printf '%s' ",$PR_LABELS," | grep -qF ",$FLOWKIT_OVERRIDE_LABEL,"; then
+            OVERRIDE_ACTOR="$(gh api "repos/$REPO/issues/$PR/events" --paginate \
+              --jq '[.[] | select(.event == "labeled" and .label.name == env.FLOWKIT_OVERRIDE_LABEL)] | last | .actor.login // empty' \
+              || true)"
+            if [ -n "$OVERRIDE_ACTOR" ]; then
+              export GITHUB_ACTOR="$OVERRIDE_ACTOR"
+            fi
+          fi
           python3 .github/scripts/flowkit_review/gate.py \
             "$RUNNER_TEMP/findings.json" \
             --labels "$PR_LABELS"
