@@ -8,6 +8,43 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-31
+
+### Added
+- Knowledge compounding: after every merged issue a best-effort haiku station
+  distills transferable learnings to `.flowkit/learnings/`; planner and
+  builder read the 10 most recent distillates. Config switch `learnings`
+  (default true). (#27)
+- Run-level token cap for parallel runs: with `parallelism > 1` the run stops
+  starting new units once global spend exceeds the sum of unit budgets ×
+  `runBudgetFactor` (default 1.2); deferred units are reported as
+  `deferredByBudget`. The exact per-issue cap at `parallelism: 1` is
+  unchanged. (#27)
+- Template version stamping + drift warning: setup stamps every copied file
+  and writes `.claude/flowkit-version`; the SessionStart hook warns when the
+  installed templates lag behind the plugin. (#25)
+- Repo CI running all six test suites on every PR, plus local tests for the
+  critical review-pipeline shell steps (#28)
+- Operator commands: `/flowkit:status` (read-only dashboard),
+  `/flowkit:nightly` (guardrail-gated unattended night runs), and the
+  `prd` mode in flowkit:issue (PRD → epic + child issues with blocked-by
+  graph). (#26)
+- Plugin dependency on `superpowers` (auto-installed via
+  `claude-plugins-official`; cross-marketplace allowlist set).
+
+### Removed
+- The cross-vendor critic station — entirely: the Codex CLI integration, the
+  Claude fallback review, the `flowkit:critic` skill, `critic`/
+  `models.critic`/`markers.critic` config and the `codex exec` permission.
+  The PR deep-review pipeline with its adversarial verifier proved strictly
+  stronger in live use; the critic was redundant token spend.
+
+### Changed
+- Token savings: gate-wait and gate-merge stations run on haiku (mechanical
+  work — waiting, merge commands, gh verification); dead-code and doc-sync
+  reviewers in the CI pipeline default to haiku (triage over pre-filtered
+  input). Code review and the adversarial verifier stay on opus.
+
 ## [0.6.0] - 2026-07-31
 
 ### Added

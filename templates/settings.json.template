@@ -10,7 +10,7 @@
       "Bash(gh milestone list*)", "Bash(gh sub-issue*)", "Bash(gh run list*)", "Bash(gh run view*)",
       "Bash(gh label list*)", "Bash(gh api repos/*/branches/*/protection)",
       "Bash(git push*)", "Bash(git switch*)", "Bash(git merge*)",
-      "Bash(jq *)", "Bash(mktemp*)", "Bash(codex exec*)",
+      "Bash(jq *)", "Bash(mktemp*)",
       {{STACK_ALLOW}}
     ],
     "deny": [

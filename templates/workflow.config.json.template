@@ -10,37 +10,79 @@
     "smoke": "{{SMOKE_CMD_OR_EMPTY}}"
   },
   "extraGates": [],
-  "protectedAreas": ["security", "auth", "billing", "migrations", "scaling"],
-  "areas": ["frontend", "backend", "infra", "security", "auth", "billing", "migrations", "scaling", "docs"],
+  "protectedAreas": [
+    "security",
+    "auth",
+    "billing",
+    "migrations",
+    "scaling"
+  ],
+  "areas": [
+    "frontend",
+    "backend",
+    "infra",
+    "security",
+    "auth",
+    "billing",
+    "migrations",
+    "scaling",
+    "docs"
+  ],
   "parallelism": 3,
-  "caps": { "maxParallel": 4, "issuesPerRun": 10, "groomingIssuesPerWeek": 15 },
+  "caps": {
+    "maxParallel": 4,
+    "issuesPerRun": 10,
+    "groomingIssuesPerWeek": 15
+  },
   "budgets": {
-    "S": { "turns": 20, "tokens": 200000 },
-    "M": { "turns": 60, "tokens": 500000 },
-    "L": { "turns": 120, "tokens": 1100000 }
+    "S": {
+      "turns": 20,
+      "tokens": 200000
+    },
+    "M": {
+      "turns": 60,
+      "tokens": 500000
+    },
+    "L": {
+      "turns": 120,
+      "tokens": 1100000
+    }
   },
   "opusTurnWeight": 3,
   "runBudgetFactor": 1.2,
   "models": {
     "grooming": "haiku",
-    "planner": { "SM": "sonnet", "L": "opus" },
-    "builder": { "SM": "sonnet", "L": "opus" },
+    "planner": {
+      "SM": "sonnet",
+      "L": "opus"
+    },
+    "builder": {
+      "SM": "sonnet",
+      "L": "opus"
+    },
     "verifier": "sonnet",
-    "critic": "opus",
     "escalation": "opus"
   },
-  "autoReady": { "impulse": "P2", "gapScan": "off" },
+  "autoReady": {
+    "impulse": "P2",
+    "gapScan": "off"
+  },
   "maxFixRounds": 3,
   "mergeCheck": "coordinator",
   "overrideLabel": "override-claude-review",
-  "markers": { "plan": "<!-- plan:v1 -->", "acVerify": "<!-- ac-verify:v2 -->", "critic": "<!-- critic:v1 -->" },
+  "markers": {
+    "plan": "<!-- plan:v1 -->",
+    "acVerify": "<!-- ac-verify:v2 -->"
+  },
   "milestoneExcludeRegex": "",
-  "excludeLabels": ["type/operator", "type/epic"],
+  "excludeLabels": [
+    "type/operator",
+    "type/epic"
+  ],
   "respectDependencies": true,
   "learnings": true,
   "issueLimit": 300,
   "browserProof": false,
   "notify": false,
-  "critic": { "enabled": true, "fallback": "claude" },
   "onSmokeFailure": "revert"
 }

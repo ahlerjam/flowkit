@@ -1,6 +1,14 @@
 {
-  "runnerLabels": ["ubuntu-latest"],
-  "models": { "codeReview": "claude-opus-5", "deadCode": "claude-sonnet-5", "docSync": "claude-sonnet-5", "iacSafety": "claude-opus-5", "verifier": "claude-opus-5" },
+  "runnerLabels": [
+    "ubuntu-latest"
+  ],
+  "models": {
+    "codeReview": "claude-opus-5",
+    "deadCode": "claude-haiku-4-5-20251001",
+    "docSync": "claude-haiku-4-5-20251001",
+    "iacSafety": "claude-opus-5",
+    "verifier": "claude-opus-5"
+  },
   "apiChangePaths": [],
   "iacChangePaths": [],
   "deadCodePaths": [],

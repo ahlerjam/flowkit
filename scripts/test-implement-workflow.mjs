@@ -39,7 +39,7 @@ const defaultResponse = (label) => {
   if (label === 'preflight') return { clean: true }
   if (/^build /.test(label)) return { pr: 100 + n, branch: `feat/${n}-x`, skipped: false }
   if (/^ac-verify/.test(label)) return { pass: true, unmet: [] }
-  if (/^critic/.test(label) || /^security/.test(label)) return { blockers: [] }
+  if (/^security/.test(label)) return { blockers: [] }
   if (/^gate-wait /.test(label)) return { green: true }
   if (/^gate-merge /.test(label)) return { merged: true, postMergeGreen: true }
   return {} // plan, fix*, cleanup, needs-human, budget-abort: Ergebnis ungenutzt

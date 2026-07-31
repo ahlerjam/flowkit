@@ -13,8 +13,12 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Verfügung, Verzeichnis-Check unter `~/.claude/plugins/` (Glob/ls); context7
    per `ToolSearch("context7")`.
    - `superpowers:test-driven-development`, `superpowers:systematic-debugging`,
-     `superpowers:verification-before-completion` → fehlen sie, degradieren
-     Builder/Fix-Runden/PR-Vorbereitung auf die Inline-Disziplin der Prompts.
+     `superpowers:verification-before-completion` → superpowers ist seit 0.7.0
+     als Plugin-Dependency deklariert und wird bei der flowkit-Installation
+     automatisch mitinstalliert; dieser Check bleibt als Fallback (z. B. wenn
+     der Marketplace claude-plugins-official nicht konfiguriert ist). Fehlen
+     die Skills, degradieren Builder/Fix-Runden/PR-Vorbereitung auf die
+     Inline-Disziplin der Prompts.
    - `browser-use` → fehlt er, entfällt der Verhaltens-Beweis im Browser für
      `area/frontend`-Issues (Config-Schalter `browserProof` bleibt wirkungslos).
    - context7 (MCP) → fehlt es, raten Planner/Builder Framework-APIs aus

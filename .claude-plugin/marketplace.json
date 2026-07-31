@@ -1,11 +1,16 @@
 {
   "name": "flowkit",
-  "owner": { "name": "ahlerjam" },
+  "owner": {
+    "name": "ahlerjam"
+  },
   "plugins": [
     {
       "name": "flowkit",
       "source": "./",
-      "description": "Universal GitHub-issue-driven agent workflow: AI-groomed backlog, autonomous runner with hard budgets, model tiering, five-layer verification stack."
+      "description": "Universal GitHub-issue-driven agent workflow: AI-groomed backlog, autonomous runner with hard budgets, model tiering, layered verification stack."
     }
+  ],
+  "allowCrossMarketplaceDependenciesOn": [
+    "claude-plugins-official"
   ]
 }
