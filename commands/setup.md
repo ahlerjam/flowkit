@@ -36,16 +36,20 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    ableiten, Unklares im selben AskUserQuestion-Block wie oben klären. Gegen
    `${CLAUDE_PLUGIN_ROOT}/templates/workflow.config.schema.json` validieren (python3 + json,
    ohne Fremdpakete: Pflichtfelder und Typen manuell prüfen). Bei einem Update einer
-   bestehenden Config die seit ihrer Anlage dazugekommenen Felder ergänzen —
-   aktuell `respectDependencies` (GitHub-native „blocked by"-Dependencies, Default
-   `true`; braucht `gh` ≥ 2.94 für `--json blockedBy`, `gh --version` prüfen und
-   bei älterer gh den Wert auf `false` setzen plus Hinweis in den Abschlussbericht)
-   und `commands.setup` (Bootstrap-Kommando für frische Worktrees, z. B.
-   `uv sync --extra dev` oder `npm ci` — aus README/CI ableiten; gibt es keins,
-   Feld leer lassen oder weglassen).
+   bestehenden Config die Migrationsliste
+   `${CLAUDE_PLUGIN_ROOT}/templates/config-migrations.json` laden (geordnete
+   Liste von `{version, field, default, note}`) und der Reihe nach anwenden:
+   jedes dort gelistete Feld, das in der Config FEHLT, mit seinem `default`
+   ergänzen (Punkt-Pfade wie `commands.setup` bezeichnen verschachtelte
+   Felder; vom Operator gesetzte Werte NIE überschreiben — nur fehlende Felder
+   ergänzen, wie bisher). Die `note` je Migration beachten (sie kann
+   Versions-Checks oder abweichende Defaults verlangen) und jede angewandte
+   Migration (version + field) im Abschlussbericht (Schritt 8) ausweisen.
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
-   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6) sowie fehlende
+   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6),
+   seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
+   Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
 4. **Board (optional, Stufe-1-Delta §13):** Labels sind in Stufe 1 die einzige
    Pflicht-Übersicht. Auf Operator-Wunsch: `gh project create --owner <owner>
