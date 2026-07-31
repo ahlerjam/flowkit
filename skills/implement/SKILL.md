@@ -17,8 +17,11 @@ description: Use when a defined scope of this repository should be built autonom
 
 Ein Aufruf, danach keine Rückfrage bis fertig oder Stop. Qualität kommt aus den
 Stationen (frischer AC-Verifier, Critic, Review-Gate), nicht aus Zwischenfragen.
-Jedes Issue hat ein hartes Budget (CONFIG.budgets je size-Label) — Überschreitung
-bricht sauber ab statt weiterzubrennen.
+Jedes Issue hat ein Budget (CONFIG.budgets je size-Label) — Überschreitung bricht
+sauber ab statt weiterzubrennen. Hart je Issue ist dieser Deckel bei
+`parallelism: 1`; bei `parallelism > 1` tritt an seine Stelle ein
+Lauf-Gesamtdeckel (siehe Stop-Regeln), weil der Token-Zähler dort keiner
+einzelnen Einheit zurechenbar ist.
 
 ## Scope auflösen (im Hauptkontext, via gh; REPO_SLUG=CONFIG.repoSlug)
 
@@ -188,9 +191,20 @@ statt still ewig zu blockieren.
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall): erster Fehler → Cleanup +
   Queue-Ende (transient); zweiter technischer Fehler derselben Einheit → Lauf
   stoppt mit Bericht.
-- **Budget-Überschreitung** → Einheit sauber abgebrochen (Kommentar, Label
-  `budget-exceeded`, PR auf Draft, Worktree-Cleanup), zählt NICHT als Fehler,
-  Lauf geht weiter.
+- **Budget-Überschreitung je Issue** (nur bei `parallelism: 1` — nur dort ist das
+  Delta von `budget.spent()` einer Einheit zurechenbar) → Einheit sauber
+  abgebrochen (Kommentar, Label `budget-exceeded`, PR auf Draft,
+  Worktree-Cleanup), zählt NICHT als Fehler, Lauf geht weiter.
+- **Lauf-Gesamtdeckel** (bei `parallelism > 1`, `tokenMode: "run"`): Deckel =
+  Summe der Einheiten-Budgets dieses Laufs × `CONFIG.runBudgetFactor` (Default
+  1.2). Ist er überschritten, wird KEINE neue Einheit mehr gestartet; laufende
+  Einheiten laufen normal zu Ende und der Lauf endet regulär mit Bericht. Die
+  nicht mehr gestarteten Einheiten stehen im Bericht unter `deferredByBudget`
+  (nicht in `remaining`, nicht in `blocked`) — kein Fehler, kein Stop, kein
+  Label auf GitHub; sie kommen im nächsten Lauf einfach wieder dran. Eine grobe
+  Näherung mit Absicht: ein per-Issue-Deckel wäre bei parallelen Workern nicht
+  attribuierbar, und laufende Einheiten mittendrin abzubrechen verbrennt mehr,
+  als es spart.
 - **Dauerhaft blockiert** (Blocker außerhalb des Laufs und offen, oder Blocker im
   Lauf gescheitert/abgebrochen, oder Dependency-Zyklus): die Einheit wird EINMAL aus
   der Queue genommen — kein Requeue — und im Lauf-Bericht unter `blocked`

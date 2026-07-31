@@ -78,11 +78,28 @@ if (orphanProt.length) {
 const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: 'opus' }
 // Token-Attribution: budget.spent() ist ein GLOBALER Zähler. Sein Delta ist nur bei
 // parallelism 1 einer Einheit zurechenbar — bei >1 enthielte es den Verbrauch aller
-// anderen Worker (Fehlabbrüche + unbrauchbare Messdaten). Deshalb:
-const TOKEN_MODE = HAS_BUDGET ? (PAR === 1 ? 'delta' : 'off') : 'off'
-if (TOKEN_MODE !== 'delta') LOG(`flowkit: Token-Deckel AUS (${HAS_BUDGET ? 'parallelism>1: globales Delta wäre falsch' : 'Engine ohne budget-API'}) — harte Grenze dieses Laufs: maxFixRounds=${MAXFIX} je Issue. Kalibrier-Läufe mit parallelism 1 fahren.`)
+// anderen Worker (Fehlabbrüche + unbrauchbare Messdaten). Ein PER-EINHEIT-Deckel ist
+// dort also unmöglich ('delta' nur bei PAR === 1). Was der globale Zähler sehr wohl
+// hergibt, ist eine LAUF-Aussage: Modus 'run' deckelt nicht die einzelne Einheit,
+// sondern den Lauf als Ganzes — ist die Summe der Einheiten-Budgets (mal
+// runBudgetFactor) verbraucht, startet keine neue Einheit mehr. Grobe Näherung mit
+// Absicht: sie verhindert das Durchbrennen eines Laufs, ohne eine Attribution zu
+// behaupten, die es nicht gibt.
+const TOKEN_MODE = HAS_BUDGET ? (PAR === 1 ? 'delta' : 'run') : 'off'
 
 const budgetFor = (u) => (C.budgets && C.budgets[u.size]) || { turns: 60, tokens: 500000 }
+const RUN_FACTOR = C.runBudgetFactor === undefined ? 1.2 : C.runBudgetFactor
+if (typeof RUN_FACTOR !== 'number' || !(RUN_FACTOR > 0) || !Number.isFinite(RUN_FACTOR)) {
+  throw new Error(`flowkit: runBudgetFactor muss eine positive Zahl sein (ist ${JSON.stringify(C.runBudgetFactor)}) — ein ungültiger Wert ergäbe NaN als Lauf-Deckel und würde ihn still abschalten.`)
+}
+// Lauf-Gesamtdeckel: Summe der Einheiten-Budgets dieses Laufs, mal Reserve-Faktor.
+const runCap = Math.round(units.reduce((s, u) => s + budgetFor(u).tokens, 0) * RUN_FACTOR)
+const runStart = HAS_BUDGET ? budget.spent() : 0
+if (TOKEN_MODE === 'run') {
+  LOG(`flowkit: per-Issue-Token-Deckel AUS bei parallelism ${PAR} (das globale budget.spent()-Delta ist keiner Einheit zurechenbar) — stattdessen Lauf-Gesamtdeckel ${runCap} Tokens (Σ Einheiten-Budgets × runBudgetFactor ${RUN_FACTOR}): ist er überschritten, startet keine neue Einheit mehr, laufende laufen zu Ende. Per-Issue-Deckel gibt es nur bei parallelism 1 — Kalibrier-Läufe dort fahren. Harte Grenze je Issue bleibt maxFixRounds=${MAXFIX}.`)
+} else if (TOKEN_MODE === 'off') {
+  LOG(`flowkit: Token-Deckel AUS (Engine ohne budget-API) — harte Grenze dieses Laufs: maxFixRounds=${MAXFIX} je Issue. Kalibrier-Läufe mit parallelism 1 fahren.`)
+}
 const modelFor = (station, u, esc) => {
   const size = u.size === 'L' ? 'L' : 'SM'
   let m =
@@ -333,6 +350,7 @@ const failures = {}
 const done = []
 const failed = []
 const blocked = []
+const deferredByBudget = []
 let stopped = null
 const inFlightAreas = new Set()
 const inFlightIssues = new Set()
@@ -362,9 +380,22 @@ const dropBlocked = (u, by) => {
   LOG(`#${u.n} dauerhaft blockiert durch ${JSON.stringify(by)} — aus der Queue genommen (kein Requeue).`)
 }
 
+// Lauf-Gesamtdeckel (TOKEN_MODE 'run', also parallelism > 1): geprüft wird
+// ausschließlich VOR dem Start einer neuen Einheit. Laufende Einheiten werden nie
+// abgebrochen — sie haben ihren PR schon halb fertig, ein Abbruch mittendrin
+// verbrennt mehr als er spart. Der Rest der Queue wandert einmalig nach
+// deferredByBudget (kein Requeue, kein Fehler, kein Stop).
+const runOverCap = () => TOKEN_MODE === 'run' && budget.spent() - runStart > runCap
+
 const pickNext = () => {
   for (;;) {
     if (!queue.length) return null
+    if (runOverCap()) {
+      const rest = queue.splice(0, queue.length)
+      for (const u of rest) deferredByBudget.push(u.n)
+      LOG(`flowkit: Lauf-Gesamtdeckel überschritten (${budget.spent() - runStart} von ${runCap} Tokens) — ${rest.length} Einheit(en) nicht mehr gestartet: ${JSON.stringify(deferredByBudget)}. Laufende Einheiten laufen normal zu Ende, der Lauf endet danach regulär.`)
+      return null
+    }
     const dead = queue.findIndex((u) => deadBlockers(u).length > 0)
     if (dead !== -1) {
       const u = queue.splice(dead, 1)[0]
@@ -468,7 +499,7 @@ phase('Implement')
 // serverseitiges Gate + Protection ist Auto-Merge nicht zulässig).
 const pre = await agent(`${PRE}PRE-FLIGHT (read-only, KEINE Mutation): 1. Haupt-Tree sauber? git status --porcelain muss leer sein UND git branch --show-current muss ${BRANCH} sein. 2. gh auth status ok? 3. Branch-Protection aktiv? gh api repos/${SLUG}/branches/${BRANCH}/protection (GET ist erlaubt) muss Status 200 liefern und required_status_checks enthalten${C.mergeCheck ? ` (erwartet u. a. "${C.mergeCheck}")` : ''} — 404 heißt: keine Protection, Auto-Merge nicht zulässig. Return { clean, note } — clean nur, wenn alle drei Punkte erfüllt.`, { label: 'preflight', phase: 'Implement', model: 'haiku', schema: PREFLIGHT_SCHEMA })
 if (!pre || pre.clean !== true) {
-  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), failed: [], blocked: [], parallelism: PAR, tokenMode: TOKEN_MODE }
+  return { done: [], stopped: { issue: 0, reason: `Pre-Flight fehlgeschlagen: ${(pre && pre.note) || 'kein Befund'}` }, remaining: units.map((u) => u.n), failed: [], blocked: [], deferredByBudget: [], parallelism: PAR, tokenMode: TOKEN_MODE, runCap: TOKEN_MODE === 'run' ? runCap : null }
 }
 
 if (!queue.length) LOG('flowkit: keine units übergeben — nichts zu tun.')
@@ -480,4 +511,4 @@ if (PAR > 1) {
 
 if (blocked.length) LOG(`flowkit: ${blocked.length} Einheit(en) dauerhaft blockiert (Blocker offen bzw. im Lauf gescheitert): ${JSON.stringify(blocked)}`)
 
-return { done, stopped, remaining: queue.map((u) => u.n), failed, blocked, parallelism: PAR, tokenMode: TOKEN_MODE }
+return { done, stopped, remaining: queue.map((u) => u.n), failed, blocked, deferredByBudget, parallelism: PAR, tokenMode: TOKEN_MODE, runCap: TOKEN_MODE === 'run' ? runCap : null }

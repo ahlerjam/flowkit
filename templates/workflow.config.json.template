@@ -20,6 +20,7 @@
     "L": { "turns": 120, "tokens": 1100000 }
   },
   "opusTurnWeight": 3,
+  "runBudgetFactor": 1.2,
   "models": {
     "grooming": "haiku",
     "planner": { "SM": "sonnet", "L": "opus" },

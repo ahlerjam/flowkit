@@ -17,6 +17,7 @@
     "parallelism": { "type": "integer", "minimum": 1, "maximum": 4 },
     "caps": { "type": "object", "properties": { "maxParallel": { "type": "integer", "minimum": 1, "maximum": 4 }, "issuesPerRun": { "type": "integer", "minimum": 1 }, "groomingIssuesPerWeek": { "type": "integer", "minimum": 0 } } },
     "opusTurnWeight": { "type": "integer", "default": 3 },
+    "runBudgetFactor": { "type": "number", "exclusiveMinimum": 0, "default": 1.2, "description": "Reserve-Faktor für den Lauf-Gesamtdeckel bei parallelism > 1: Deckel = Summe der Einheiten-Budgets dieses Laufs × diesem Faktor. Ist er überschritten, startet keine neue Einheit mehr (laufende laufen zu Ende, Rest der Queue wird als deferredByBudget gemeldet). Bei parallelism 1 ohne Wirkung — dort greift der exakte per-Issue-Deckel." },
     "onSmokeFailure": { "enum": ["revert", "pause-cd", "p0-issue"], "default": "revert" },
     "budgets": {
       "type": "object", "required": ["S", "M", "L"],
