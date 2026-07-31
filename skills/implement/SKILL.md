@@ -159,19 +159,29 @@ statt still ewig zu blockieren.
    P0/P1 blocken.
 5. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
    frischer Agent VOR dem Merge (Injection, AuthZ, Secrets, Test-Gaming-Querblick).
-6. **Gate + Merge:** CONFIG.mergeCheck abwarten, P0/P1 adressieren, Merge-Checks,
-   Squash-Merge, unabhängige gh-Verifikation, Post-Merge-CI + CONFIG.commands.smoke
-   (falls gesetzt; rot → onSmokeFailure-Policy + keine weiteren Merges).
+6. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
+   bei FAILURE P0/P1 adressieren (Restbudget aus maxFixRounds) — parallele
+   Einheiten warten so nicht auf fremde CI, der Lock serialisiert nur noch das
+   Mergen.
+7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
+   BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
+   erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
+   (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
+   Post-Merge-CI + CONFIG.commands.smoke (falls gesetzt; rot →
+   onSmokeFailure-Policy + keine weiteren Merges). Ein Merge passiert NIE
+   außerhalb des Locks.
    Alle Fix-Runden aus 3.-6. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds.
-7. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
+8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).
 
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 
-- **Inhaltlicher Gate-Fail** (AC-Verifier/Critic/Security/Review-Gate nach
-  erschöpftem maxFixRounds nicht grün): die EINHEIT stoppt — Label `needs-human`,
+- **Inhaltlicher Gate-Fail** (AC-Verifier/Critic/Security/Gate-Wait nach
+  erschöpftem maxFixRounds nicht grün, oder die Merge-Station findet im Lock
+  rote Checks bzw. einen semantischen Konflikt vor — im Lock wird nicht
+  gefixt): die EINHEIT stoppt — Label `needs-human`,
   PR bleibt als Draft mit Kommentar; der LAUF fährt mit dem nächsten Issue fort.
   Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2 laufen Fixes genau
   eine Modellstufe höher (CONFIG.models.escalation).

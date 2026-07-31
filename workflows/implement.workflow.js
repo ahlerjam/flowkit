@@ -153,6 +153,10 @@ const VERIFY_SCHEMA = {
     note: { type: 'string' },
   },
 }
+const WAIT_SCHEMA = {
+  type: 'object', required: ['green'], additionalProperties: false,
+  properties: { green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' }, note: { type: 'string' } },
+}
 const GATE_SCHEMA = {
   type: 'object', required: ['merged', 'postMergeGreen'], additionalProperties: false,
   properties: { merged: { type: 'boolean' }, postMergeGreen: { type: 'boolean', description: 'false = main-CI oder Smoke nach dem Merge rot; onSmokeFailure-Policy wurde ausgeführt' }, note: { type: 'string' } },
@@ -200,15 +204,27 @@ const criticPrompt = (n, pr) => `${PRE}Du bist die CRITIC-Station für PR #${pr}
 
 const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter Bereich) für PR #${pr} (Issue #${n}) — er läuft VOR dem Merge. Falls ein Security-Skill verfügbar ist (security-review oder ein repo-lokaler Skill laut AGENTS.md), lade ihn und wende ihn auf den PR-Diff an; sonst prüfe selbst fokussiert: Injection (SQL/Shell/Template), AuthZ/AuthN an neuen oder geänderten Endpunkten, Secrets im Diff, unsichere Defaults, Datenverlustpfade. NUR geänderte Zeilen, jedes Finding mit file:line und konkretem Szenario. Ergebnis als PR-Kommentar (gh pr comment ${pr} -R ${SLUG}), erste Zeile exakt: <!-- security-pass:v1 -->. Return { blockers: [je P0/P1 ein Kurztitel] } — leeres Array wenn keine.`
 
-const gatePrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist das GATE für PR #${pr} (Issue #${n}).
+// Gate-Split (Issue #9): das Grün-Warten (bis 45 Minuten) lief bis 0.5.0 IM
+// Merge-Lock — bei parallelism > 1 warteten fertig gebaute Einheiten aufeinander,
+// der Lock serialisierte das Warten statt nur das Mergen. Jetzt zwei Stationen:
+// gateWaitPrompt wartet OHNE Lock auf Grün (inkl. der P0/P1-Fix-Runden),
+// gateMergePrompt läuft IM Lock und macht nur noch Vorchecks, BEHIND-Update
+// (inkl. erneutem Grün-Warten NACH dem Update — der Branch ist dann wirklich
+// hinter main gewesen, das Re-Warten gehört in den Lock) und den Merge selbst.
+// Ein Merge passiert NIE außerhalb von withMergeLock.
+const gateWaitPrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist die GATE-WAIT-Station für PR #${pr} (Issue #${n}). Sie läuft VOR dem Merge-Lock: Du wartest nur auf grüne Checks und fixst Findings — du mergst NIE, führst KEIN gh pr merge aus und machst KEINE Merge-Vorchecks (das übernimmt die Merge-Station danach).
 1. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit — danach Fehler werfen, dessen Text mit "GATE:" beginnt). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'}
 2. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget), danach Fehler werfen, dessen Text mit "GATE:" beginnt.
-3. Erster grüner Durchlauf = mergen, keine Re-Trigger-Jagd. Vorher: kein ${C.overrideLabel || 'override'}-Label auf dem PR; malformed-tree-Check (git ls-tree -r HEAD | awk '{print $4}' | sort | uniq -d muss leer sein); ist der Branch BEHIND ${BRANCH}: in einem eigenen Worktree (git fetch origin && git worktree add <tmp> ${branch}) git merge origin/${BRANCH} in den Branch (KEIN rebase, KEIN force), Ergebnis via ${PUSH} pushen, Worktree entfernen; max ${Math.max(2, PAR)} Zyklen — BEHIND zählt NIE als inhaltlicher Fehler.
-3b. KONFLIKT-Zweig (git merge origin/${BRANCH} endet non-zero): Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt — reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht): beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 3. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, Worktree entfernen (es bleibt NIE ein halb-gemergter Zustand zurück), dann Fehler werfen, dessen Text mit "GATE: Merge-Konflikt" beginnt und die Konfliktdateien auflistet. Ein wiederkehrender Konflikt zählt auf den Zyklus-Cap aus Schritt 3 und endet als GATE:-Fehler, nie als Endlosschleife.
-4. gh pr merge ${pr} --squash --delete-branch -R ${SLUG}.
-5. Unabhängig verifizieren: gh pr view ${pr} -R ${SLUG} --json state,mergedAt — merged gilt NUR, wenn gh es sagt.
-6. Post-Merge-Beweis: gh run list -R ${SLUG} --branch ${BRANCH} --limit 3 abwarten/sichten${C.commands.smoke ? `; Smoke: ${C.commands.smoke}` : ''}. Alles grün → postMergeGreen: true. Sonst postMergeGreen: false UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Grund immer in note.
-Return { merged, postMergeGreen } erst nach Schritt 5/6.`
+Return { green: true } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün".`
+
+const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station für PR #${pr} (Issue #${n}). Sie läuft IM Merge-Lock (andere Einheiten warten auf dich — zügig, keine Nebenaufgaben); die GATE-WAIT-Station hat die Checks bereits grün gemeldet.
+1. Erster grüner Durchlauf = mergen, keine Re-Trigger-Jagd. Vorher: kein ${C.overrideLabel || 'override'}-Label auf dem PR; malformed-tree-Check (git ls-tree -r HEAD | awk '{print $4}' | sort | uniq -d muss leer sein); Checks-Stand gegenprüfen (gh pr checks ${pr} -R ${SLUG} — sind sie entgegen der Wait-Meldung nicht mehr grün, Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt).
+2. Ist der Branch BEHIND ${BRANCH}: in einem eigenen Worktree (git fetch origin && git worktree add <tmp> ${branch}) git merge origin/${BRANCH} in den Branch (KEIN rebase, KEIN force), Ergebnis via ${PUSH} pushen, Worktree entfernen; danach erneut auf Grün warten (gh pr checks ${pr} -R ${SLUG} --watch, INNERHALB dieses Locks, Wartezeit insgesamt maximal 45 Minuten — Timeout oder FAILURE nach dem BEHIND-Update: Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt); max ${Math.max(2, PAR)} Zyklen — BEHIND zählt NIE als inhaltlicher Fehler.
+2b. KONFLIKT-Zweig (git merge origin/${BRANCH} endet non-zero): Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt — reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht): beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 2. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, Worktree entfernen (es bleibt NIE ein halb-gemergter Zustand zurück), dann Fehler werfen, dessen Text mit "GATE: Merge-Konflikt" beginnt und die Konfliktdateien auflistet. Ein wiederkehrender Konflikt zählt auf den Zyklus-Cap aus Schritt 2 und endet als GATE:-Fehler, nie als Endlosschleife.
+3. gh pr merge ${pr} --squash --delete-branch -R ${SLUG}.
+4. Unabhängig verifizieren: gh pr view ${pr} -R ${SLUG} --json state,mergedAt — merged gilt NUR, wenn gh es sagt.
+5. Post-Merge-Beweis: gh run list -R ${SLUG} --branch ${BRANCH} --limit 3 abwarten/sichten${C.commands.smoke ? `; Smoke: ${C.commands.smoke}` : ''}. Alles grün → postMergeGreen: true. Sonst postMergeGreen: false UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Grund immer in note.
+Return { merged, postMergeGreen } erst nach Schritt 4/5.`
 
 const runUnit = async (u) => {
   const n = u.n
@@ -276,7 +292,12 @@ const runUnit = async (u) => {
   }
   if (over()) return budgetStop(`vor Gate (PR #${pr})`)
 
-  const gate = await withMergeLock(() => agent(gatePrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
+  // Gate-Split (Issue #9): das Grün-Warten läuft OHNE Lock — parallele Einheiten
+  // warten so nicht auf fremde CI. Erst mit grünem Befund wird der Lock genommen;
+  // gemergt wird ausschließlich innerhalb von withMergeLock.
+  const wait = await agent(gateWaitPrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: WAIT_SCHEMA })
+  if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'}`)
+  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, built.branch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
 
   // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
