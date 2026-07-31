@@ -199,7 +199,11 @@ Nach JEDEM Lauf-Ende den Lauf-Bericht persistieren:
 Workflows plus `scope` (der aufgelöste Auftrag) und `startedAt`. `.flowkit/` ist
 gitignored; diese Dateien sind die dauerhafte Datenbasis für die
 Budget-Kalibrierung (Token je size-Label, nur Läufe mit `tokenMode: "delta"`)
-und das Aufwärm-Material für spätere Sessions. Der Lauf-Bericht enthält
+und das Aufwärm-Material für spätere Sessions. Die Kalibrier-Auswertung
+liefert `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/budget_report.py .flowkit/runs`
+(Median/p90 je size-Label plus Vorschlag für `budgets.<size>.tokens`); der
+Vorschlag wird dem Operator präsentiert und NIE automatisch in die Config
+geschrieben. Der Lauf-Bericht enthält
 Token-Verbrauch je Issue (Datenbasis für die Budget-Kalibrierung in Stufe 2). Wenn CONFIG.notify true ist: nach Lauf-Ende
 den Kurzbericht (erledigt/offen/Stop-Grund) zusätzlich als Push-Benachrichtigung
 senden (PushNotification-Tool, falls in der Session verfügbar; sonst überspringen).
