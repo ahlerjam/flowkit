@@ -1,6 +1,6 @@
 {
   "name": "flowkit",
-  "owner": { "name": "jam@ahler.org" },
+  "owner": { "name": "ahlerjam" },
   "plugins": [
     {
       "name": "flowkit",
