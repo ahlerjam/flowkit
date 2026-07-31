@@ -37,6 +37,7 @@ jobs:
     outputs:
       has_api_changes: ${{ steps.detect.outputs.has_api_changes }}
       has_iac_changes: ${{ steps.detect.outputs.has_iac_changes }}
+      run_dead_code: ${{ steps.detect.outputs.run_dead_code }}
       cache_hit: ${{ steps.cache.outputs.cache_hit }}
       diff_hash: ${{ steps.cache.outputs.diff_hash }}
     steps:
@@ -62,6 +63,24 @@ jobs:
               echo "$key=false" >> "$GITHUB_OUTPUT"
             fi
           done
+          # dead-code gating: vulture + ruff are Python-only. Config key
+          # `deadCode` in .github/flowkit-review.json: "on" | "off" | "auto"
+          # (default). "auto" runs the job only when the repo root carries a
+          # Python project marker. Other stacks: set "off" (or leave "auto")
+          # — the coordinator treats the skipped job as empty findings, not
+          # as a CI failure.
+          DEAD_MODE="$(jq -r '.deadCode // "auto"' .github/flowkit-review.json)"
+          case "$DEAD_MODE" in
+            on)  RUN_DEAD=true ;;
+            off) RUN_DEAD=false ;;
+            *)
+              if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
+                RUN_DEAD=true
+              else
+                RUN_DEAD=false
+              fi ;;
+          esac
+          echo "run_dead_code=$RUN_DEAD" >> "$GITHUB_OUTPUT"
       - name: Bounded diff + sanitize
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -193,8 +212,11 @@ jobs:
                 injection via unsanitized input; missing auth on a new/changed
                 endpoint; a migration dropping a NOT NULL column without a
                 default; a handler that swallows errors and masks data loss.
-              P1 = must-fix. A new user-visible bug; a changed production path in
-                controller/ or worker/ with zero test coverage; an error response
+              P1 = must-fix. A new user-visible bug; a changed file under one
+                of the `criticalPaths` prefixes configured in
+                .github/flowkit-review.json (read that array first; an empty
+                array means NO path-based escalation) with zero test coverage;
+                an error response
                 missing code/message; a concrete perf regression in the diff;
                 a new or changed test that cannot fail (assert True, empty test
                 body, unconditional pytest.skip/xfail, or removed/weakened
@@ -251,7 +273,12 @@ jobs:
 
   dead-code:
     needs: prep
-    if: needs.prep.outputs.cache_hit != 'true'
+    # run_dead_code gates the Python-only toolchain (vulture + ruff): config
+    # key `deadCode` = "on" | "off" | "auto" (auto = Python markers in the
+    # repo root). A skip here is handled skip-aware by the coordinator (empty
+    # findings, no ci-failure placeholder). Extension point for other stacks:
+    # swap this job's analyzer steps and set `deadCode: "on"`.
+    if: needs.prep.outputs.cache_hit != 'true' && needs.prep.outputs.run_dead_code == 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 10
     steps:
@@ -266,7 +293,7 @@ jobs:
           # vulture/ruff need the whole tree to judge "unused", but we keep only
           # findings in files THIS PR changed — pre-existing dead code in
           # untouched files is out of scope and the dominant false-positive
-          # source (it falsely escalates api/v1 + shared/models symbols to P1).
+          # source (it falsely escalates criticalPaths symbols to P1).
           DEAD_PATHS="$(jq -r '.deadCodePaths | if length == 0 then ["."] else . end | join(" ")' .github/flowkit-review.json)"
           uv run vulture $DEAD_PATHS \
             --min-confidence 80 \
@@ -333,8 +360,10 @@ jobs:
 
             Output ONLY a JSON object (no markdown, no prose, no code fences), with
             reviewer = "dead-code", confidence_filter = 80. All findings get
-            category = "dead-code". Severity: P2 unless the dead symbol is in
-            controller/api/v1/ or shared/models/ (then P1).
+            category = "dead-code". Severity: P2 unless the dead symbol's file
+            path starts with one of the `criticalPaths` prefixes configured in
+            .github/flowkit-review.json (then P1) — read that array first; an
+            empty array means everything stays P2.
 
             Schema (conform exactly):
             {"type":"object","required":["reviewer","confidence_filter","findings"],
@@ -480,8 +509,10 @@ jobs:
             workflow prompt.
 
             Step 1 — Read the PR diff: ${{ runner.temp }}/diff.bounded.patch
-            Review ONLY hunks in this diff (infra/, server-setup/,
-            alembic/versions/). Do not audit unchanged IaC files.
+            Review ONLY hunks in this diff that touch paths matching the
+            `iacChangePaths` prefixes configured in .github/flowkit-review.json
+            (read that file first — those prefixes are why this job was
+            triggered). Do not audit unchanged IaC files.
 
             Check changed IaC/migration hunks for: destructive schema changes
             without rollback, hardcoded secrets, world-open firewall rules,

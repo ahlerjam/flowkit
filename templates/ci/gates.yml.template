@@ -13,6 +13,9 @@ jobs:
         run: {{SETUP_CMD}}
       - name: Lint (blocking)
         run: {{LINT_CMD}}
+      # If CONFIG.commands.typecheck is empty, REMOVE the two typecheck lines
+      # below entirely during setup — an empty `run:` would render a broken
+      # required step that blocks every merge.
       - name: Typecheck (blocking)
         run: {{TYPECHECK_CMD}}
       - name: Tests (blocking)
