@@ -34,6 +34,7 @@ directly — the install arrives as a pull request.
 | Idea → issue | `/flowkit:issue impuls "<one sentence>"` | Full spec issue (What/Why/Scope/AC + labels); low-risk issues become `agent-ready` automatically |
 | AI finds work | `/flowkit:issue gaps <area> [max N]` | Spec issues labeled `needs-triage` — flipping the label to `agent-ready` is your only mandatory touchpoint |
 | Work it off | `/flowkit:implement next N \| issues A,B \| epic N \| milestone "X" [max X]` | Autonomous run: Planner → Builder (TDD, isolated worktree) → fresh AC verifier → critic → PR deep review → auto squash-merge → post-merge smoke |
+| Pick up stranded work | `/flowkit:implement resume [all]` | Re-opens `budget-exceeded` (with `all`: also `needs-human`) issues that have an open PR — the builder continues the existing branch instead of starting over; human commits on the branch are treated as ground truth |
 | Standalone second opinion | `/flowkit:critic <PR>` | Cross-vendor review via Codex CLI; without Codex access a narrowly-scoped Claude fallback takes over (clearly marked) |
 
 ## Guardrails
@@ -49,8 +50,18 @@ directly — the install arrives as a pull request.
   occupy a slot, and anything that stays blocked is reported instead of retried
   forever. Set `respectDependencies: false` to opt out.
 - **Verification is enforced structurally, not requested politely:** blocking CI
-  gates, a fresh-context AC verifier with a refutation mandate, a cross-vendor
-  critic, an independent PR review pipeline and command-level PreToolUse hooks.
+  gates, a fresh-context AC verifier with a refutation mandate (including a
+  mechanical test-gaming check and a proof that new tests actually fail on the
+  merge base), a cross-vendor critic, an independent PR review pipeline and
+  command-level PreToolUse hooks.
+- **Merge conflicts are never guessed away:** the gate resolves only pure
+  append-conflicts in accumulating files (both entries survive); anything
+  semantic aborts cleanly (`git merge --abort`, no half-merged worktree) into
+  `needs-human` with the conflicting files listed — the run continues.
+- **Worktree cleanup is deterministic:** a script
+  (`scripts/cleanup-worktrees.sh`), not an LLM, decides what may be removed —
+  only worktrees whose branch carries the issue number as its own segment;
+  main tree, detached and foreign worktrees are structurally out of reach.
 
 ## Configuration
 
