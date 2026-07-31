@@ -97,6 +97,16 @@ const PRE = `Lies ZUERST AGENTS.md im Repo-Root — Konventionen und rote Linien
 
 `
 
+// Worktree-Cleanup ist die einzige Stelle, an der ein Aufräum-Agent fremde
+// Arbeit zerstören kann. Erstlauf-Befund 2026-07-31 (academic-research): der
+// Fehler-Cleanup von Issue #450 las "verwaiste Worktrees dieses Laufs" als
+// Freibrief und entfernte per `git worktree remove --force` die Worktrees
+// zweier noch LAUFENDER Einheiten sowie die fremder Runs. Deren Builder liefen
+// danach ins Leere ("Refusing to run there"), lieferten pr:0, und der
+// AC-Verifier prüfte gegen einen PR, den es nie gab. Deshalb: Cleanup
+// ausschließlich am Branch DIESES Issues festmachen, nie am Pfadmuster.
+const wtCleanup = (n) => `Worktree-Cleanup NUR für Issue #${n}: \`git worktree list --porcelain\` lesen und ausschließlich Worktrees entfernen, deren ausgecheckter Branch die Issue-Nummer ${n} als eigenes Segment im Branchnamen trägt. Worktrees anderer Issues, Worktrees anderer Läufe und den Haupt-Tree NIEMALS anfassen — auch dann nicht, wenn sie verwaist, leer oder alt aussehen: parallel laufende Einheiten arbeiten darin. Kein Aufräumen nach Pfadmuster, kein \`git worktree prune\`. Bleibt nach dieser Regel nichts übrig, ist das das korrekte Ergebnis.`
+
 const PR_SCHEMA = {
   type: 'object', required: ['pr', 'branch', 'skipped'], additionalProperties: false,
   properties: {
@@ -175,7 +185,7 @@ const runUnit = async (u) => {
   let fixRounds = 0
   const escNow = () => fixRounds >= 2
   const budgetStop = async (stand) => {
-    await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Falls ein offener PR zum Issue existiert (Nummer via gh pr list -R ${SLUG} --search "Closes #${n}" --state open ermitteln): gh pr ready <NUMMER> --undo -R ${SLUG} (auf Draft setzen). 4. Verwaiste Worktrees dieses Issues entfernen (git worktree list, git worktree remove).`,
+    await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Falls ein offener PR zum Issue existiert (Nummer via gh pr list -R ${SLUG} --search "Closes #${n}" --state open ermitteln): gh pr ready <NUMMER> --undo -R ${SLUG} (auf Draft setzen). 4. ${wtCleanup(n)}`,
       { label: `budget-abort #${n}`, phase: 'Implement', model: 'haiku' })
     return { budgetExceeded: true, note: stand }
   }
@@ -314,13 +324,13 @@ const pickNext = () => {
 
 // Inhaltlicher Gate-Fail: Einheit stoppt (needs-human), der LAUF fährt fort (Spec §6).
 const needsHumanStop = async (u, reason) => {
-  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: kurzer Stand + Grund (maxFixRounds erschöpft bzw. Gate nicht grün). 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Offenen PR zum Issue (gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open) auf Draft setzen (gh pr ready <N> --undo -R ${SLUG}). 4. Verwaiste Worktrees dieses Issues entfernen (git worktree list / git worktree remove); lokale Feature-Branches OHNE offenen PR mit git branch -D löschen.`,
+  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: kurzer Stand + Grund (maxFixRounds erschöpft bzw. Gate nicht grün). 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Offenen PR zum Issue (gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open) auf Draft setzen (gh pr ready <N> --undo -R ${SLUG}). 4. ${wtCleanup(u.n)} Lokale Feature-Branches dieses Issues OHNE offenen PR mit git branch -D löschen.`,
     { label: `needs-human #${u.n}`, phase: 'Implement', model: 'haiku' })
 }
 
 // Cleanup im Fehlerpfad (Spec §8: Cleanup ist Teil JEDER Abbruch-Routine).
 const cleanupUnit = async (u, reason) => {
-  await agent(`${PRE}CLEANUP nach technischem Fehler für Issue #${u.n} (${reason}). NUR aufräumen, nichts implementieren: verwaiste Worktrees dieses Laufs entfernen (git worktree list; git worktree remove --force für Worktrees dieses Issues), zurückgelassene lokale Branches OHNE offenen PR mit git branch -D löschen. Offene PRs und Remote-Branches mit offenem PR NICHT anfassen.`,
+  await agent(`${PRE}CLEANUP nach technischem Fehler für Issue #${u.n} (${reason}). NUR aufräumen, nichts implementieren: ${wtCleanup(u.n)} Zurückgelassene lokale Branches DIESES Issues OHNE offenen PR mit git branch -D löschen. Offene PRs und Remote-Branches mit offenem PR NICHT anfassen.`,
     { label: `cleanup #${u.n}`, phase: 'Implement', model: 'haiku' })
 }
 
