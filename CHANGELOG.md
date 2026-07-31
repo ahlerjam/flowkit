@@ -24,7 +24,7 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   and writes `.claude/flowkit-version`; the SessionStart hook warns when the
   installed templates lag behind the plugin. (#25)
 - Repo CI running all six test suites on every PR, plus local tests for the
-  critical review-pipeline shell steps (#28)
+  critical review-pipeline shell steps (#29)
 - Operator commands: `/flowkit:status` (read-only dashboard),
   `/flowkit:nightly` (guardrail-gated unattended night runs), and the
   `prd` mode in flowkit:issue (PRD → epic + child issues with blocked-by
