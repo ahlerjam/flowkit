@@ -45,7 +45,9 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Feld leer lassen oder weglassen).
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
-   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6) sowie fehlende
+   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6),
+   seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
+   Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
 4. **Board (optional, Stufe-1-Delta §13):** Labels sind in Stufe 1 die einzige
    Pflicht-Übersicht. Auf Operator-Wunsch: `gh project create --owner <owner>
