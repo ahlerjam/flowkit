@@ -17,11 +17,10 @@ JSON_MARKER_CLOSE = "-->"
 CONVERGENCE_THRESHOLD = 3
 
 
-def extract_prev_file_rounds(previous_body: str) -> dict[str, int]:
-    """Parse the per-file round counter from a previous sticky comment.
+def extract_prev_payload(previous_body: str) -> dict[str, Any]:
+    """Parse the embedded JSON payload from a previous sticky comment.
 
-    Fail-safe: any parse problem returns an empty dict (the counter resets,
-    the warning is lost for one round, the gate is never affected).
+    Fail-safe: any parse problem returns an empty dict.
     """
     start_idx = previous_body.find(JSON_MARKER_OPEN)
     if start_idx < 0:
@@ -34,7 +33,16 @@ def extract_prev_file_rounds(previous_body: str) -> dict[str, int]:
         prev = json.loads(previous_body[start:end].strip())
     except json.JSONDecodeError:
         return {}
-    rounds = prev.get("fileRounds")
+    return prev if isinstance(prev, dict) else {}
+
+
+def extract_prev_file_rounds(previous_body: str) -> dict[str, int]:
+    """Parse the per-file round counter from a previous sticky comment.
+
+    Fail-safe: any parse problem returns an empty dict (the counter resets,
+    the warning is lost for one round, the gate is never affected).
+    """
+    rounds = extract_prev_payload(previous_body).get("fileRounds")
     if not isinstance(rounds, dict):
         return {}
     out: dict[str, int] = {}
@@ -69,12 +77,23 @@ def _format_finding(f: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
-def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> str:
+def render_sticky_comment(
+    payload: dict[str, Any],
+    previous_body: str = "",
+    diff_hash: str | None = None,
+    cached: bool = False,
+) -> str:
     """Render findings.json to human + machine-readable Markdown comment.
 
     Carries a per-file counter of consecutive rounds with blocking (P0/P1)
     findings across renders via the embedded JSON marker; files at or above
     CONVERGENCE_THRESHOLD get a visible operator hint.
+
+    ``diff_hash`` is stored in the embedded JSON so cache_check.py can skip
+    the LLM review when a later run sees a byte-identical diff. ``cached``
+    marks such a run: the round counter is carried over UNCHANGED (an
+    identical diff is not a new review round) and the comment says the
+    review was reused.
 
     Raises:
         ValueError: if any finding is missing 'severity' field.
@@ -85,7 +104,9 @@ def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> s
     for f in findings:
         if "severity" not in f:
             title = f.get("title", "(untitled)")
-            raise ValueError(f"Finding missing 'severity' field: {title}. All findings must have severity (P0/P1/P2).")
+            raise ValueError(
+                f"Finding missing 'severity' field: {title}. All findings must have severity (P0/P1/P2)."
+            )
 
     by_sev = {
         "P0": [f for f in findings if f["severity"] == "P0"],
@@ -94,11 +115,21 @@ def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> s
     }
 
     prev_rounds = extract_prev_file_rounds(previous_body) if previous_body else {}
-    blocking_files = sorted(
-        {f["file"] for f in findings if f["severity"] in ("P0", "P1") and f.get("file")}
-    )
-    file_rounds = {name: prev_rounds.get(name, 0) + 1 for name in blocking_files}
+    if cached:
+        # Identical diff, review reused — no new round has happened.
+        file_rounds = prev_rounds
+    else:
+        blocking_files = sorted(
+            {
+                f["file"]
+                for f in findings
+                if f["severity"] in ("P0", "P1") and f.get("file")
+            }
+        )
+        file_rounds = {name: prev_rounds.get(name, 0) + 1 for name in blocking_files}
     payload = dict(payload)
+    if diff_hash:
+        payload["diffHash"] = diff_hash
     if file_rounds:
         payload["fileRounds"] = file_rounds
     else:
@@ -114,6 +145,14 @@ def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> s
         f"- **P2 (Backlog):** {len(by_sev['P2'])}",
         "",
     ]
+
+    if cached:
+        lines.append(
+            "> :recycle: **Review reused:** the diff is byte-identical to the last "
+            "reviewed version (base update only) — LLM review skipped, gate "
+            "re-applied to the stored findings."
+        )
+        lines.append("")
 
     if convergence:
         parts = "; ".join(
@@ -143,7 +182,9 @@ def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> s
                 lines.append("")
         if by_sev["P2"]:
             lines.append("<details>")
-            lines.append(f"<summary>P2 ({len(by_sev['P2'])} findings) — click to expand</summary>")
+            lines.append(
+                f"<summary>P2 ({len(by_sev['P2'])} findings) — click to expand</summary>"
+            )
             lines.append("")
             for f in by_sev["P2"]:
                 lines.append(_format_finding(f))
@@ -157,7 +198,9 @@ def render_sticky_comment(payload: dict[str, Any], previous_body: str = "") -> s
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="Render findings.json to PR-comment Markdown.")
+    parser = argparse.ArgumentParser(
+        description="Render findings.json to PR-comment Markdown."
+    )
     parser.add_argument("findings", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -166,6 +209,16 @@ def _cli() -> int:
         default=None,
         help="File containing the body of the existing sticky comment (optional).",
     )
+    parser.add_argument(
+        "--diff-hash",
+        default=None,
+        help="sha256 of the bounded diff; stored in the embedded JSON for the review cache.",
+    )
+    parser.add_argument(
+        "--cached",
+        action="store_true",
+        help="This run reused the stored findings (identical diff): no round increment, reuse note in the comment.",
+    )
     args = parser.parse_args()
 
     previous_body = ""
@@ -173,7 +226,14 @@ def _cli() -> int:
         previous_body = args.previous.read_text()
 
     payload = json.loads(args.findings.read_text())
-    args.output.write_text(render_sticky_comment(payload, previous_body=previous_body))
+    args.output.write_text(
+        render_sticky_comment(
+            payload,
+            previous_body=previous_body,
+            diff_hash=args.diff_hash,
+            cached=args.cached,
+        )
+    )
     sys.stderr.write(f"Wrote sticky comment to {args.output}\n")
     return 0
 

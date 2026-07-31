@@ -58,6 +58,12 @@ directly — the install arrives as a pull request.
   append-conflicts in accumulating files (both entries survive); anything
   semantic aborts cleanly (`git merge --abort`, no half-merged worktree) into
   `needs-human` with the conflicting files listed — the run continues.
+- **The deep review never pays twice for the same diff:** every merge updates
+  the remaining PR branches (a `synchronize` event) — the review pipeline
+  hashes the diff against the merge base and, when it is byte-identical to the
+  last reviewed version, skips all LLM reviewer jobs and re-applies the stored
+  verdict from the sticky comment. Any anomaly falls open toward a full
+  review, never toward green-without-review.
 - **Worktree cleanup is deterministic:** a script
   (`scripts/cleanup-worktrees.sh`), not an LLM, decides what may be removed —
   only worktrees whose branch carries the issue number as its own segment;

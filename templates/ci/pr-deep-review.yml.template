@@ -24,6 +24,8 @@ jobs:
     outputs:
       has_api_changes: ${{ steps.detect.outputs.has_api_changes }}
       has_iac_changes: ${{ steps.detect.outputs.has_iac_changes }}
+      cache_hit: ${{ steps.cache.outputs.cache_hit }}
+      diff_hash: ${{ steps.cache.outputs.diff_hash }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -61,6 +63,33 @@ jobs:
           name: pr-diff
           path: ${{ runner.temp }}/diff.bounded.patch
           retention-days: 1
+      - id: cache
+        name: Review cache check (skip LLM review when the diff is unchanged)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Every merge re-triggers `synchronize` on the remaining open PRs via
+          # the gate's BEHIND update. When main touched disjoint files the diff
+          # against the merge base is byte-identical — re-running the LLM
+          # reviewers would burn tokens for the same verdict. cache_check.py is
+          # conservative: any anomaly means "miss" (full review), never
+          # green-without-review.
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.body | contains("<!-- flowkit-review:v1 -->"))] | .[0].body // ""' \
+            > "$RUNNER_TEMP/previous-comment.md" || printf '' > "$RUNNER_TEMP/previous-comment.md"
+          python3 .github/scripts/flowkit_review/cache_check.py \
+            --diff "$RUNNER_TEMP/diff.bounded.patch" \
+            --previous "$RUNNER_TEMP/previous-comment.md" \
+            --findings-out "$RUNNER_TEMP/cached-findings.json" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        if: steps.cache.outputs.cache_hit == 'true'
+        with:
+          name: cached-findings
+          path: ${{ runner.temp }}/cached-findings.json
+          retention-days: 1
       - name: Fetch PR context (description + linked-issue acceptance criteria)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,6 +122,7 @@ jobs:
 
   code-review:
     needs: prep
+    if: needs.prep.outputs.cache_hit != 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 15
     steps:
@@ -196,6 +226,7 @@ jobs:
 
   dead-code:
     needs: prep
+    if: needs.prep.outputs.cache_hit != 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 10
     steps:
@@ -311,7 +342,7 @@ jobs:
 
   doc-sync:
     needs: prep
-    if: needs.prep.outputs.has_api_changes == 'true'
+    if: needs.prep.outputs.has_api_changes == 'true' && needs.prep.outputs.cache_hit != 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 8
     steps:
@@ -384,7 +415,7 @@ jobs:
 
   iac-safety:
     needs: prep
-    if: needs.prep.outputs.has_iac_changes == 'true'
+    if: needs.prep.outputs.has_iac_changes == 'true' && needs.prep.outputs.cache_hit != 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 10
     steps:
@@ -457,7 +488,7 @@ jobs:
     # makes pass-1 precision the highest-value lever). Best-effort — if this job
     # produces no verdicts the coordinator filters nothing (zero blast radius).
     needs: [prep, code-review, dead-code, doc-sync, iac-safety]
-    if: always() && needs.prep.result == 'success'
+    if: always() && needs.prep.result == 'success' && needs.prep.outputs.cache_hit != 'true'
     runs-on: {{RUNNER_LABELS}}
     timeout-minutes: 10
     steps:
@@ -549,7 +580,17 @@ jobs:
         with:
           path: ${{ runner.temp }}/findings
 
+      - name: Use cached findings (identical diff — LLM review skipped)
+        if: needs.prep.outputs.cache_hit == 'true'
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/findings/cached-findings/cached-findings.json" "$RUNNER_TEMP/findings.json"
+          echo "Reusing stored findings ($(jq '.findings | length' "$RUNNER_TEMP/findings.json") finding(s)) — no reviewer job ran."
+
       - name: Substitute missing artifacts (skip-aware)
+        if: needs.prep.outputs.cache_hit != 'true'
         env:
           RUNNER_TEMP: ${{ runner.temp }}
           CODE_REVIEW_RESULT: ${{ needs.code-review.result }}
@@ -611,6 +652,7 @@ jobs:
           done
 
       - name: Merge findings
+        if: needs.prep.outputs.cache_hit != 'true'
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
@@ -622,12 +664,14 @@ jobs:
             --output "$RUNNER_TEMP/findings.json"
 
       - name: Download verifier verdicts
+        if: needs.prep.outputs.cache_hit != 'true'
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
         continue-on-error: true
         with:
           name: verdicts
           path: ${{ runner.temp }}/verdicts
       - name: Apply verifier verdicts (drop refuted P0/P1)
+        if: needs.prep.outputs.cache_hit != 'true'
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
@@ -642,6 +686,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           RUNNER_TEMP: ${{ runner.temp }}
+          CACHE_HIT: ${{ needs.prep.outputs.cache_hit }}
+          DIFF_HASH: ${{ needs.prep.outputs.diff_hash }}
         run: |
           set -euo pipefail
           # Fetch the existing sticky comment (if any) so render.py can carry
@@ -650,10 +696,13 @@ jobs:
           gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '[.[] | select(.body | contains("<!-- flowkit-review:v1 -->"))] | .[0].body // ""' \
             > "$RUNNER_TEMP/previous-comment.md" || printf '' > "$RUNNER_TEMP/previous-comment.md"
+          EXTRA=""
+          [ "$CACHE_HIT" = "true" ] && EXTRA="--cached"
           python3 .github/scripts/flowkit_review/render.py \
             "$RUNNER_TEMP/findings.json" \
             --previous "$RUNNER_TEMP/previous-comment.md" \
-            --output "$RUNNER_TEMP/comment.md"
+            --diff-hash "$DIFF_HASH" \
+            --output "$RUNNER_TEMP/comment.md" $EXTRA
 
       - name: Post or update sticky comment
         env:
