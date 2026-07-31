@@ -16,7 +16,7 @@ description: Use when a defined scope of this repository should be built autonom
 ## Zusage an den Operator
 
 Ein Aufruf, danach keine Rückfrage bis fertig oder Stop. Qualität kommt aus den
-Stationen (frischer AC-Verifier, Critic, Review-Gate), nicht aus Zwischenfragen.
+Stationen (frischer AC-Verifier, Review-Gate, Deep-Review-Pipeline), nicht aus Zwischenfragen.
 Jedes Issue hat ein Budget (CONFIG.budgets je size-Label) — Überschreitung bricht
 sauber ab statt weiterzubrennen. Hart je Issue ist dieser Deckel bei
 `parallelism: 1`; bei `parallelism > 1` tritt an seine Stelle ein
@@ -158,27 +158,25 @@ statt still ewig zu blockieren.
    JSON-Block `{"verdicts":[{"ac","met","evidence"}]}`, ein Eintrag je AC.
    Folgerunden lesen den vorherigen Block, die Fix-Runde erhält das vorherige
    Verdict, und jede Regression (met → unmet) wird explizit ausgewiesen.
-4. **Critic** (wenn CONFIG.critic.enabled): Cross-Vendor-Review via flowkit:critic,
-   P0/P1 blocken.
-5. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
+4. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
    frischer Agent VOR dem Merge (Injection, AuthZ, Secrets, Test-Gaming-Querblick).
-6. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
+5. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
    bei FAILURE P0/P1 adressieren (Restbudget aus maxFixRounds) — parallele
    Einheiten warten so nicht auf fremde CI, der Lock serialisiert nur noch das
    Mergen.
-7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
+6. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
    (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
    Post-Merge-CI + CONFIG.commands.smoke (falls gesetzt; rot →
    onSmokeFailure-Policy + keine weiteren Merges). Ein Merge passiert NIE
    außerhalb des Locks.
-   Alle Fix-Runden aus 3.-6. zählen zusammen auf das EINE issue-globale
+   Alle Fix-Runden aus 3.-5. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds.
-8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
+7. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).
-9. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
+8. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
    destilliert das ÜBERTRAGBARE Wissen der Einheit nach
    `.flowkit/learnings/<issue>-<slug>.md` — Frontmatter (issue, pr, area, date)
    plus „Was funktionierte" / „Fallen", zusammen höchstens ~15 Zeilen. Gemeint
@@ -191,7 +189,7 @@ statt still ewig zu blockieren.
 
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 
-- **Inhaltlicher Gate-Fail** (AC-Verifier/Critic/Security/Gate-Wait nach
+- **Inhaltlicher Gate-Fail** (AC-Verifier/Security/Gate-Wait nach
   erschöpftem maxFixRounds nicht grün, oder die Merge-Station findet im Lock
   rote Checks bzw. einen semantischen Konflikt vor — im Lock wird nicht
   gefixt): die EINHEIT stoppt — Label `needs-human`,

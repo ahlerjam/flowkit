@@ -2,50 +2,249 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ahlerjam/flowkit/templates/workflow.config.schema.json",
   "type": "object",
-  "required": ["repoSlug", "commands", "protectedAreas", "parallelism", "budgets", "models", "autoReady"],
+  "required": [
+    "repoSlug",
+    "commands",
+    "protectedAreas",
+    "parallelism",
+    "budgets",
+    "models",
+    "autoReady"
+  ],
   "properties": {
-    "repoSlug": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
-    "defaultBranch": { "type": "string", "default": "main" },
-    "pushCommand": { "type": "string", "default": "git push", "description": "z. B. git pushci wenn Local-CI-Gate installiert ist" },
-    "commands": {
-      "type": "object", "required": ["test", "lint"],
-      "properties": { "setup": { "type": "string", "description": "Bootstrap-Kommando für frische Worktrees (Dependencies installieren, z. B. uv sync --extra dev, npm ci); Builder, Fix-Runden und Verifier führen es als Schritt 0 aus, bevor irgendetwas anderes läuft" }, "test": { "type": "string" }, "lint": { "type": "string" }, "typecheck": { "type": "string" }, "smoke": { "type": "string" } }
+    "repoSlug": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$"
     },
-    "extraGates": { "type": "array", "items": { "type": "string" }, "description": "weitere lokale Gate-Kommandos (OpenAPI-Check, Schema-Drift ...)" },
-    "protectedAreas": { "type": "array", "items": { "type": "string" } },
-    "areas": { "type": "array", "items": { "type": "string" } },
-    "parallelism": { "type": "integer", "minimum": 1, "maximum": 4 },
-    "caps": { "type": "object", "properties": { "maxParallel": { "type": "integer", "minimum": 1, "maximum": 4 }, "issuesPerRun": { "type": "integer", "minimum": 1 }, "groomingIssuesPerWeek": { "type": "integer", "minimum": 0 } } },
-    "opusTurnWeight": { "type": "integer", "default": 3 },
-    "runBudgetFactor": { "type": "number", "exclusiveMinimum": 0, "default": 1.2, "description": "Reserve-Faktor für den Lauf-Gesamtdeckel bei parallelism > 1: Deckel = Summe der Einheiten-Budgets dieses Laufs × diesem Faktor. Ist er überschritten, startet keine neue Einheit mehr (laufende laufen zu Ende, Rest der Queue wird als deferredByBudget gemeldet). Bei parallelism 1 ohne Wirkung — dort greift der exakte per-Issue-Deckel." },
-    "onSmokeFailure": { "enum": ["revert", "pause-cd", "p0-issue"], "default": "revert" },
+    "defaultBranch": {
+      "type": "string",
+      "default": "main"
+    },
+    "pushCommand": {
+      "type": "string",
+      "default": "git push",
+      "description": "z. B. git pushci wenn Local-CI-Gate installiert ist"
+    },
+    "commands": {
+      "type": "object",
+      "required": [
+        "test",
+        "lint"
+      ],
+      "properties": {
+        "setup": {
+          "type": "string",
+          "description": "Bootstrap-Kommando für frische Worktrees (Dependencies installieren, z. B. uv sync --extra dev, npm ci); Builder, Fix-Runden und Verifier führen es als Schritt 0 aus, bevor irgendetwas anderes läuft"
+        },
+        "test": {
+          "type": "string"
+        },
+        "lint": {
+          "type": "string"
+        },
+        "typecheck": {
+          "type": "string"
+        },
+        "smoke": {
+          "type": "string"
+        }
+      }
+    },
+    "extraGates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "weitere lokale Gate-Kommandos (OpenAPI-Check, Schema-Drift ...)"
+    },
+    "protectedAreas": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "areas": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "parallelism": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "caps": {
+      "type": "object",
+      "properties": {
+        "maxParallel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "issuesPerRun": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "groomingIssuesPerWeek": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "opusTurnWeight": {
+      "type": "integer",
+      "default": 3
+    },
+    "runBudgetFactor": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 1.2,
+      "description": "Reserve-Faktor für den Lauf-Gesamtdeckel bei parallelism > 1: Deckel = Summe der Einheiten-Budgets dieses Laufs × diesem Faktor. Ist er überschritten, startet keine neue Einheit mehr (laufende laufen zu Ende, Rest der Queue wird als deferredByBudget gemeldet). Bei parallelism 1 ohne Wirkung — dort greift der exakte per-Issue-Deckel."
+    },
+    "onSmokeFailure": {
+      "enum": [
+        "revert",
+        "pause-cd",
+        "p0-issue"
+      ],
+      "default": "revert"
+    },
     "budgets": {
-      "type": "object", "required": ["S", "M", "L"],
-      "additionalProperties": { "type": "object", "required": ["turns", "tokens"], "properties": { "turns": { "type": "integer" }, "tokens": { "type": "integer" } } }
+      "type": "object",
+      "required": [
+        "S",
+        "M",
+        "L"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "turns",
+          "tokens"
+        ],
+        "properties": {
+          "turns": {
+            "type": "integer"
+          },
+          "tokens": {
+            "type": "integer"
+          }
+        }
+      }
     },
     "models": {
       "type": "object",
       "properties": {
-        "grooming": { "type": "string" },
-        "planner": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
-        "builder": { "type": "object", "properties": { "SM": { "type": "string" }, "L": { "type": "string" } } },
-        "verifier": { "type": "string" },
-        "critic": { "type": "string", "description": "Modell für die Critic-Station. Template-Default ist opus, solange der Codex-Fallback (critic.fallback) aktiv ist — das Claude-Fallback-Review ersetzt den Cross-Vendor-Pass und braucht dafür mehr Modellstärke; mit echtem Codex-Zugang darf sonnet reichen." },
-        "escalation": { "type": "string" }
+        "grooming": {
+          "type": "string"
+        },
+        "planner": {
+          "type": "object",
+          "properties": {
+            "SM": {
+              "type": "string"
+            },
+            "L": {
+              "type": "string"
+            }
+          }
+        },
+        "builder": {
+          "type": "object",
+          "properties": {
+            "SM": {
+              "type": "string"
+            },
+            "L": {
+              "type": "string"
+            }
+          }
+        },
+        "verifier": {
+          "type": "string"
+        },
+        "escalation": {
+          "type": "string"
+        }
       }
     },
-    "autoReady": { "type": "object", "required": ["impulse", "gapScan"], "properties": { "impulse": { "enum": ["P1", "P2", "P3"] }, "gapScan": { "enum": ["off", "P1", "P2", "P3"] } } },
-    "maxFixRounds": { "type": "integer", "default": 3 },
-    "mergeCheck": { "type": "string", "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün" },
-    "overrideLabel": { "type": "string" },
-    "markers": { "type": "object", "properties": { "plan": { "type": "string" }, "acVerify": { "type": "string" }, "critic": { "type": "string" } } },
-    "milestoneExcludeRegex": { "type": "string" },
-    "excludeLabels": { "type": "array", "items": { "type": "string" } },
-    "respectDependencies": { "type": "boolean", "default": true, "description": "GitHub-native Issue-Dependencies (blocked by) berücksichtigen: blockierte Issues fallen aus der next-Auswahl, innerhalb eines Laufs läuft der Blocker zuerst. false = Dependencies ignorieren (Reihenfolge wie vor 0.3.0)" },
-    "learnings": { "type": "boolean", "default": true, "description": "Wissens-Kompounding: nach jedem gemergten Issue destilliert eine best-effort-Station das übertragbare Wissen nach .flowkit/learnings/<issue>-<slug>.md (repo-lokal, gitignored); Planner und Builder lesen die 10 jüngsten Destillate vorab. false = beides aus" },
-    "issueLimit": { "type": "integer", "default": 300 },
-    "browserProof": { "type": "boolean", "default": false },
-    "notify": { "type": "boolean", "default": false },
-    "critic": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "fallback": { "enum": ["claude", "skip"], "default": "claude", "description": "Verhalten ohne Codex-Zugang: claude = Same-Family-Ersatz-Review (Fokus Spec-Compliance + Test-Manipulation), skip = Station überspringen. Default: claude" } } }
+    "autoReady": {
+      "type": "object",
+      "required": [
+        "impulse",
+        "gapScan"
+      ],
+      "properties": {
+        "impulse": {
+          "enum": [
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "gapScan": {
+          "enum": [
+            "off",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        }
+      }
+    },
+    "maxFixRounds": {
+      "type": "integer",
+      "default": 3
+    },
+    "mergeCheck": {
+      "type": "string",
+      "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün"
+    },
+    "overrideLabel": {
+      "type": "string"
+    },
+    "markers": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "string"
+        },
+        "acVerify": {
+          "type": "string"
+        }
+      }
+    },
+    "milestoneExcludeRegex": {
+      "type": "string"
+    },
+    "excludeLabels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "respectDependencies": {
+      "type": "boolean",
+      "default": true,
+      "description": "GitHub-native Issue-Dependencies (blocked by) berücksichtigen: blockierte Issues fallen aus der next-Auswahl, innerhalb eines Laufs läuft der Blocker zuerst. false = Dependencies ignorieren (Reihenfolge wie vor 0.3.0)"
+    },
+    "learnings": {
+      "type": "boolean",
+      "default": true,
+      "description": "Wissens-Kompounding: nach jedem gemergten Issue destilliert eine best-effort-Station das übertragbare Wissen nach .flowkit/learnings/<issue>-<slug>.md (repo-lokal, gitignored); Planner und Builder lesen die 10 jüngsten Destillate vorab. false = beides aus"
+    },
+    "issueLimit": {
+      "type": "integer",
+      "default": 300
+    },
+    "browserProof": {
+      "type": "boolean",
+      "default": false
+    },
+    "notify": {
+      "type": "boolean",
+      "default": false
+    }
   }
 }

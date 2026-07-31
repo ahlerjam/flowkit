@@ -1,6 +1,6 @@
 export const meta = {
   name: 'flowkit-implement',
-  description: 'Autonomous issue runner: plan, build (TDD), fresh AC-verify, cross-vendor critic, review gate, serialized merge — parallel worktrees, hard per-issue budgets',
+  description: 'Autonomous issue runner: plan, build (TDD), fresh AC-verify, review gate, serialized merge — parallel worktrees, hard per-issue budgets',
   phases: [{ title: 'Implement' }],
 }
 
@@ -69,7 +69,7 @@ const M = C.models || {}
 // ac-verify:v2 (Issue #8): v2-Kommentare tragen zusätzlich zur Tabelle einen
 // maschinenlesbaren JSON-Block {"verdicts":[{ac,met,evidence}]} — Folgerunden
 // diffen dagegen und weisen Regressionen (met -> unmet) explizit aus.
-const MARK = Object.assign({ plan: '<!-- plan:v1 -->', acVerify: '<!-- ac-verify:v2 -->', critic: '<!-- critic:v1 -->' }, C.markers || {})
+const MARK = Object.assign({ plan: '<!-- plan:v1 -->', acVerify: '<!-- ac-verify:v2 -->' }, C.markers || {})
 // Wissens-Kompounding: jede gemergte Einheit destilliert ihr ÜBERTRAGBARES Wissen
 // nach .flowkit/learnings/ (repo-lokal, gitignored), Planner und Builder lesen die
 // jüngsten Destillate, bevor sie loslegen. Der Nutzen entsteht erst über viele
@@ -193,7 +193,7 @@ const PREFLIGHT_SCHEMA = {
   type: 'object', required: ['clean'], additionalProperties: false,
   properties: { clean: { type: 'boolean' }, note: { type: 'string' } },
 }
-const CRITIC_SCHEMA = {
+const BLOCKERS_SCHEMA = {
   type: 'object', required: ['blockers'], additionalProperties: false,
   properties: { blockers: { type: 'array', items: { type: 'string' } }, note: { type: 'string' } },
 }
@@ -228,7 +228,6 @@ Vorheriges AC-Urteil (maschinenlesbar, aus dem letzten ${MARK.acVerify}-Kommenta
 Skill superpowers:systematic-debugging laden (Ursache verstehen, nicht blind fixen). Eigenen Worktree anlegen: git fetch origin && git worktree add <tmp-pfad> ${branch} — NIE den Haupt-Tree anfassen, NIE checkout -B. ${setupStep}Im Worktree: pro Punkt erst der beweisende failing Test, dann der Fix. Lokale Gates: ${gateCmds}. ${PUSH} aus dem Worktree, danach git worktree remove.
 Zum Schluss die Task-Checkliste im PR-Body fortschreiben: aktuellen Body lesen (gh pr view ${pr} -R ${SLUG} --json body), dann via gh pr edit ${pr} -R ${SLUG} --body je behobenem Punkt einen neuen ABGEHAKTEN Eintrag "- [x] Fix: <Kurztitel>" an den "### Tasks"-Abschnitt anhängen (fehlt der Abschnitt, ihn mit genau diesen Einträgen anlegen). Bestehende Einträge NIE entfernen, umformulieren oder kürzen — die Liste wächst nur.`
 
-const criticPrompt = (n, pr) => `${PRE}Du bist die CRITIC-Station für PR #${pr} (Issue #${n}). Lade den Skill flowkit:critic (Skill-Tool) und folge ihm exakt — INKLUSIVE Schritt 0 (Verfügbarkeits-Check: ohne Codex-Login und ohne OPENAI_API_KEY greift CONFIG.critic.fallback = ${(C.critic && C.critic.fallback) || 'claude'}: bei "claude" führst du das Review selbst durch, eng fokussiert auf Spec-Compliance und Test-Manipulation, Kommentar als Claude-Fallback gekennzeichnet; bei "skip" Station per PR-Kommentar überspringen und { blockers: [] } liefern. Niemals codex blind aufrufen). Sonst: Cross-Vendor-Review via codex exec über Issue-Body + PR-Diff + AGENTS.md, inkl. Test-Manipulations-Check; Ergebnis als PR-Kommentar, erste Zeile exakt ${MARK.critic}. Return { blockers: [je P0/P1-Finding ein Kurztitel] } — leeres Array wenn keine oder übersprungen.`
 
 const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter Bereich) für PR #${pr} (Issue #${n}) — er läuft VOR dem Merge. Falls ein Security-Skill verfügbar ist (security-review oder ein repo-lokaler Skill laut AGENTS.md), lade ihn und wende ihn auf den PR-Diff an; sonst prüfe selbst fokussiert: Injection (SQL/Shell/Template), AuthZ/AuthN an neuen oder geänderten Endpunkten, Secrets im Diff, unsichere Defaults, Datenverlustpfade. NUR geänderte Zeilen, jedes Finding mit file:line und konkretem Szenario. Ergebnis als PR-Kommentar (gh pr comment ${pr} -R ${SLUG}), erste Zeile exakt: <!-- security-pass:v1 -->. Return { blockers: [je P0/P1 ein Kurztitel] } — leeres Array wenn keine.`
 
@@ -268,7 +267,7 @@ const runUnit = async (u) => {
   const unitStart = TOKEN_MODE === 'delta' ? budget.spent() : 0
   const spent = () => (TOKEN_MODE === 'delta' ? budget.spent() - unitStart : null)
   const over = () => TOKEN_MODE === 'delta' && spent() > B.tokens
-  // Issue-GLOBALER Fix-Runden-Zähler über AC-Verify, Critic und Security zusammen
+  // Issue-GLOBALER Fix-Runden-Zähler über AC-Verify und Security zusammen
   // (Spec §6 Zustandsautomat); ab Runde 2 genau EINE Eskalationsstufe für Fixes.
   let fixRounds = 0
   const escNow = () => fixRounds >= 2
@@ -309,27 +308,15 @@ const runUnit = async (u) => {
   }
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
 
-  if (C.critic && C.critic.enabled) {
-    if (over()) return budgetStop(`vor Critic (PR #${pr})`)
-    let crit = await agent(criticPrompt(n, pr), { label: `critic #${n}`, phase: 'Implement', model: M.critic || 'sonnet', schema: CRITIC_SCHEMA })
-    while (crit && crit.blockers && crit.blockers.length && fixRounds < MAXFIX) {
-      fixRounds += 1
-      if (over()) return budgetStop(`in Critic-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, built.branch, crit.blockers, verdict), { label: `critic-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
-      crit = await agent(criticPrompt(n, pr), { label: `critic+${fixRounds} #${n}`, phase: 'Implement', model: M.critic || 'sonnet', schema: CRITIC_SCHEMA })
-    }
-    if (!crit) throw new Error('GATE: Critic-Station ohne Ergebnis (Agent ausgefallen)')
-    if (crit && crit.blockers && crit.blockers.length) throw new Error(`GATE: Critic-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(crit.blockers)}`)
-  }
 
   if (PROT.includes(u.area)) {
     if (over()) return budgetStop(`vor Security (PR #${pr})`)
-    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: CRITIC_SCHEMA })
+    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
       await agent(fixPrompt(n, pr, built.branch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
-      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: CRITIC_SCHEMA })
+      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
     if (sec && sec.blockers && sec.blockers.length) throw new Error(`GATE: Security-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(sec.blockers)}`)
@@ -339,9 +326,11 @@ const runUnit = async (u) => {
   // Gate-Split (Issue #9): das Grün-Warten läuft OHNE Lock — parallele Einheiten
   // warten so nicht auf fremde CI. Erst mit grünem Befund wird der Lock genommen;
   // gemergt wird ausschließlich innerhalb von withMergeLock.
-  const wait = await agent(gateWaitPrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: WAIT_SCHEMA })
+  // Gate-Stationen auf haiku (Token-Sparen, 2026-07-31): Warten, Merge-Kommandos
+  // und gh-Verifikation sind mechanisch — die inhaltliche Prüfung ist längst gelaufen.
+  const wait = await agent(gateWaitPrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
   if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'}`)
-  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, built.branch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: GATE_SCHEMA }))
+  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, built.branch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
 
   // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
