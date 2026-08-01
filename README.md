@@ -74,6 +74,14 @@ directly — the install arrives as a pull request.
   after that many consecutive units without a merge the run halts and reports
   why, instead of burning the whole queue on a broken environment. A merge or a
   gh-verified skip resets the counter; `0` disables the breaker.
+- **Setup makes what it writes versionable:** step 7 runs a `.gitignore` guard
+  that asks `git check-ignore` (never a grep over the file) whether the config,
+  settings, hooks and version stamp it just wrote are ignored, frees exactly
+  those in one marker-delimited, root-anchored block, and re-checks instead of
+  claiming success. Without it, a repo ignoring `.claude/` keeps the install
+  local: the PR carries none of those files and the template-drift warning
+  stays silent in every fresh clone. Lines are need-driven — nothing that was
+  visible before gets hidden.
 - **GitHub-native issue dependencies are respected** (`blocked by`, set via
   `gh issue edit --add-blocked-by`): blockers run first, blocked issues never
   occupy a slot, and anything that stays blocked is reported instead of retried

@@ -129,9 +129,12 @@ Teil-Lagebild ist besser als eine Fehlermeldung.
      (setup ist idempotent und wendet die Migrationsliste an; ohne den Lauf bleiben
      Hooks, Settings und CI-Templates auf dem alten Stand)
    Fehlt die Datei: `(keine Daten — kein Versionsmarker im Repo)`. Das ist KEIN
-   Fehler und kein Drift-Beweis: der Marker wird von keinem flowkit-Schritt
-   automatisch geschrieben, ältere und manuelle Installationen haben ihn nicht.
-   In diesem Fall nichts über die Template-Aktualität behaupten.
+   Drift-Beweis: `/flowkit:setup` schreibt den Marker zwar automatisch (Schritt
+   5, seit 0.7.0), aber ältere und manuelle Installationen haben ihn nicht — und
+   bis 0.8.0 fiel er in Repos, deren .gitignore `.claude/` ausschließt, aus
+   jedem Commit heraus, war also in Clones und in CI nie vorhanden. In diesem
+   Fall nichts über die Template-Aktualität behaupten; ein `/flowkit:setup` legt
+   ihn an und stellt ihn frei.
 
 6. **Ausgabeform:** genau ein Block im Chat, Abschnitte in der Reihenfolge (a)-(e)
    mit diesen Überschriften: `Queues`, `Gestrandete Arbeit`, `Letzte Läufe`,

@@ -39,6 +39,9 @@ jobs:
       - name: review-pipeline-steps (shell-logic of the pr-deep-review template)
         run: bash scripts/test-review-pipeline-steps.sh
 
+      - name: gitignore-guard
+        run: bash scripts/test-gitignore-guard.sh
+
       # Der Offline-Test oben (Sektion (e)) vergleicht das Template gegen eine
       # Konstante. Hier wird die Konstante gegen die Wirklichkeit geprüft:
       # zeigt der Versionskommentar wirklich auf diesen Commit? Blockiert NUR

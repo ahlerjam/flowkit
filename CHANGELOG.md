@@ -44,6 +44,22 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   upstream and warns (non-blocking) once a newer tag exists. Pins drifting
   apart or a half-finished bump now fail the build instead of going unnoticed
   for 46 patch releases, which is what happened before this fix. (#38)
+- `.gitignore` guard: `/flowkit:setup` step 7 now runs
+  `scripts/gitignore-guard.sh`, which asks `git check-ignore` whether
+  `.claude/flowkit-version`, `.claude/settings.json`,
+  `.claude/workflow.config.json` and `.claude/hooks/*.sh` are ignored, writes
+  the required negations as one marker-delimited, root-anchored block
+  (`# >>> flowkit` … `# <<< flowkit`), re-checks afterwards and reports every
+  path that stays ignored (exit 3) instead of claiming success. In repos that
+  ignore `.claude/` the install PR previously carried none of the files setup
+  had just written, so the installation was purely local and the
+  template-drift warning stayed silent in every fresh clone, in CI and in every
+  runner worktree. Each line is need-driven: what was visible before stays
+  visible, and `!/.claude/` is root-anchored so a monorepo's `pkg-*/.claude/`
+  is not exposed. The runtime artefacts `.flowkit/` and `.claude/worktrees/`
+  are ignored by the same block. The block is rebuilt on every run, so a second
+  `/flowkit:setup` produces no duplicate lines. Existing installations are not
+  migrated — the guard takes effect the next time `/flowkit:setup` runs. (#39)
 
 ### Changed
 - The merge station's post-merge proof is now three-valued: the gate return

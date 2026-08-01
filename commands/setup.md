@@ -104,7 +104,11 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    überschreiben, Inhalt NUR `<PLUGIN_VERSION>` (eine Zeile, sonst nichts) —
    sie ist die primäre Drift-Quelle für den SessionStart-Hook
    (`inject-context.sh`), der sie mit der jeweils installierten
-   Plugin-Version vergleicht.
+   Plugin-Version vergleicht. Diese Datei ist nur etwas wert, wenn sie im Repo
+   LANDET: ignoriert die .gitignore des Zielrepos `.claude/`, fehlt sie in jedem
+   frischen Clone, in CI und in jedem Runner-Worktree — die Drift-Warnung bleibt
+   dort dauerhaft still. Das Freistellen erledigt Schritt 7; hier die .gitignore
+   NICHT anfassen.
 5b. **Branch-Protection (Merge-Voraussetzung, Spec §6):** read-only prüfen:
    `gh api repos/$REPO_SLUG/branches/<defaultBranch>/protection` (GET ist erlaubt).
    Bei 404: dem Operator die Einrichtung anleiten (GitHub → Settings → Branches →
@@ -214,7 +218,31 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    leer, den Typecheck-Step (`- name: Typecheck (blocking)` samt `run:`-Zeile)
    ersatzlos ENTFERNEN — ein leerer `run:` wäre ein kaputter Pflicht-Step, der
    jeden Merge blockiert. Danach `actionlint`, falls installiert.
-7. **.gitignore:** Zeile `.flowkit/` ergänzen.
+7. **.gitignore-Guard (versionierbar machen, idempotent):**
+   `bash ${CLAUDE_PLUGIN_ROOT}/scripts/gitignore-guard.sh .` ausführen. Das
+   Script ignoriert die Laufzeit-Artefakte des Runners (`.flowkit/`,
+   `.claude/worktrees/`), soweit sie es nicht schon sind, und stellt die in
+   Schritt 5 erzeugten Dateien frei, falls ein Ignore-Muster greift:
+   `.claude/flowkit-version`, `.claude/settings.json`,
+   `.claude/workflow.config.json`, `.claude/hooks/*.sh`. Jede Zeile hängt an
+   einer eigenen Bedarfsprüfung (`git check-ignore`) — was vorher sichtbar war,
+   bleibt sichtbar. Es schreibt genau EINEN markierten Block
+   (`# >>> flowkit` … `# <<< flowkit`) und baut ihn bei jedem Lauf neu; ein
+   zweites `/flowkit:setup` erzeugt keine doppelten Zeilen. Die .gitignore
+   darüber hinaus NICHT von Hand ändern und keine Negation selbst anhängen:
+   eine nackte `!.claude/flowkit-version`-Zeile ist wirkungslos, weil Git in ein
+   ausgeschlossenes Elternverzeichnis nicht absteigt.
+   Ausgabe UND Exit-Code auswerten:
+   - `gitignore-guard: ok …` bzw. `gitignore-guard: fixed <pfade>` (Exit 0) →
+     im Abschlussbericht nennen, was ergänzt wurde.
+   - `gitignore-guard: BLOCKIERT trotz Ergänzung: <pfade>` (Exit 3) → die Pfade
+     bleiben ignoriert (typisch: eine eigene `.gitignore` INNERHALB von
+     `.claude/`). NICHT mit `git add -f` erzwingen. Stattdessen wörtlich in den
+     Abschlussbericht: „Drift-Warnung inaktiv: <pfade> lassen sich in diesem
+     Repo nicht versionieren — die Templates-veraltet-Meldung des
+     SessionStart-Hooks löst in frischen Clones nie aus."
+   - Exit 1 (kein Git-Work-Tree bzw. .gitignore nicht schreibbar) → ebenfalls in
+     den Bericht; Setup läuft weiter.
 8. **Abschlussbericht:** was angelegt/geändert/übersprungen wurde, als Chat-Ausgabe;
    bei installiertem CI-Gate ZWINGEND eine Zeile zum `claude-code-action`-Pin —
    welche Version jetzt in `.github/workflows/pr-deep-review.yml` steht,
@@ -222,3 +250,17 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    ausdrücklich „neuerer Pin im Zielrepo beibehalten, Template-Pin
    `<pin_template>` ist älter"; Änderungen im Zielrepo als Branch + PR (Titel
    "chore: install flowkit"), NICHT direkt auf den Default-Branch.
+   Vor dem Commit die von Schritt 7 freigestellten Pfade explizit stagen —
+   ZUSÄTZLICH zu allem, was Schritt 1, 6 und 6b erzeugt haben:
+   `git add .gitignore .claude/flowkit-version .claude/settings.json .claude/workflow.config.json .claude/hooks`
+   plus, soweit in diesem Lauf angelegt oder geändert, `AGENTS.md`,
+   `.github/workflows/pr-deep-review.yml`, `.github/flowkit-review.json`,
+   `.github/scripts/flowkit_review`, `.github/actions/setup-claude-action`,
+   `.github/actions/setup-python-uv` und `.github/workflows/gates.yml`.
+   Der Installations-PR MUSS die `.claude/`-Dateien enthalten, sonst ist die
+   Installation rein lokal und in jedem Clone wirkungslos; er MUSS ebenso das
+   CI-Gate enthalten, sonst installiert er eine Konfiguration ohne den Prüfpfad,
+   den sie voraussetzt. Kein blankes `git add -A`: es verschluckt ein Scheitern
+   von Schritt 7 still und sammelt lokalen Claude-Zustand mit ein. Meldete
+   Schritt 7 `BLOCKIERT`, die betroffenen Pfade NICHT erzwingen — weglassen und
+   den dortigen Hinweis-Satz in den Bericht übernehmen.
