@@ -182,9 +182,21 @@ statt still ewig zu blockieren.
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
    (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
-   Post-Merge-CI + CONFIG.commands.smoke (falls gesetzt; rot →
-   onSmokeFailure-Policy + keine weiteren Merges). Ein Merge passiert NIE
-   außerhalb des Locks.
+   Post-Merge-Beweis am EIGENEN Merge-Commit (`gh pr view --json mergeCommit`),
+   dreiwertig: `green` = abgeschlossener Lauf (`status: completed`) mit
+   `conclusion: success` plus CONFIG.commands.smoke, falls gesetzt · `red` =
+   `conclusion` `failure`/`timed_out` auf dem eigenen Merge-Commit oder roter
+   Smoke → onSmokeFailure-Policy und keine weiteren Merges · `unmeasured` =
+   jeder andere `conclusion`-Wert (`cancelled`, `skipped`, `neutral`, …) →
+   KEINE Policy, kein Revert, kein Stop, nur Ausweis im Bericht
+   (`done[].postMerge`). Neubestimmt wird über den jüngsten abgeschlossenen
+   Default-Branch-Lauf, der den eigenen Merge-Commit enthält
+   (`git merge-base --is-ancestor`) — dieser Obermengen-Lauf testet fremde
+   Commits mit und darf deshalb NUR grün bestätigen; sein Rot bleibt
+   `unmeasured`, sonst revertiert der Runner einen fehlerfreien eigenen Commit
+   wegen eines fremden Fehlers. Das Warten (10-Minuten-Cap) liegt im Lock —
+   solange niemand sonst mergt, kann `cancel-in-progress` den eigenen Lauf
+   nicht abbrechen. Ein Merge passiert NIE außerhalb des Locks.
    Alle Fix-Runden aus 4.-6. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds.
 8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
@@ -224,6 +236,14 @@ statt still ewig zu blockieren.
   dauerhaft blockierte Einheiten zählen nicht mit (sie laufen nie an). `0`
   schaltet den Breaker ab. Grund: ein Lauf, der 23 Einheiten ohne einen
   einzigen PR durchreicht, soll nicht bis zum Ende brennen (Issue #31).
+- **Post-Merge rot** (`done[].postMerge == "red"`: abgeschlossener CI-Lauf auf
+  dem eigenen Merge-Commit mit `conclusion` `failure`/`timed_out` oder roter
+  Smoke): onSmokeFailure-Policy läuft, der LAUF stoppt — keine weiteren Merges
+  auf einen belegt kaputten Default-Branch. Ein *unbestimmter* Post-Merge-Lauf
+  (`"unmeasured"`, typisch ein von `cancel-in-progress` abgebrochener Lauf oder
+  ein Rot, das nur auf einem Obermengen-Lauf sichtbar ist) stoppt NICHTS und
+  löst keine Policy aus: eine fehlende Messung ist kein Fehlschlag, ein Revert
+  ohne Beleg wäre der teurere Fehler. Er steht im Bericht und im Log.
 - **Budget-Überschreitung je Issue** (nur bei `parallelism: 1` — nur dort ist das
   Delta von `budget.spent()` einer Einheit zurechenbar) → Einheit sauber
   abgebrochen (Kommentar, Label `budget-exceeded`, PR auf Draft,

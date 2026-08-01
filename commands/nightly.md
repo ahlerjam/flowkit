@@ -128,8 +128,15 @@ niemand wach bleiben muss:
   Branch-Protection aus Schritt 1.2 erzwingt es unabhängig vom Agenten; gemergt
   wird ausschließlich im Merge-Lock, semantische Konflikte brechen ab
   (`needs-human`) statt geraten zu werden.
-- **`onSmokeFailure: "revert"`:** ein roter Post-Merge-Smoke rollt den Merge
-  zurück und stoppt weitere Merges — der Default-Branch bleibt über Nacht grün.
+- **`onSmokeFailure: "revert"`:** ein BELEGT roter Post-Merge-Lauf (abgeschlossener
+  CI-Lauf auf dem eigenen Merge-Commit mit `conclusion` `failure`/`timed_out` oder
+  roter Smoke) rollt den Merge zurück und stoppt weitere Merges — der
+  Default-Branch bleibt über Nacht grün. Ein abgebrochener Lauf (`cancelled`,
+  typisch bei `concurrency: cancel-in-progress` auf dem Default-Branch) ist keine
+  Messung: er wird über den jüngsten abgeschlossenen Lauf, der den eigenen
+  Merge-Commit enthält, neu bestimmt — und weil dieser Lauf auch fremde Commits
+  testet, bestätigt er nur Grün. Bleibt es unbestimmt, rollt nichts zurück und der
+  Lauf fährt fort (`done[].postMerge == "unmeasured"`).
 - **Pre-Flight:** dirty Default-Branch, fehlende Branch-Protection oder
   gh-Auth-Problem → der Lauf startet erst gar nicht, statt halb zu laufen.
 - **`caps.issuesPerRun` und `max <X>`** deckeln die Nacht doppelt; GitHub-native

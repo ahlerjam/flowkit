@@ -202,9 +202,23 @@ const WAIT_SCHEMA = {
   type: 'object', required: ['green'], additionalProperties: false,
   properties: { green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' }, note: { type: 'string' } },
 }
+// Dreiwertig statt boolean (Issue #32): ein abgebrochener oder übersprungener
+// Post-Merge-Lauf ist KEINE Rotmeldung, sondern eine fehlende Messung. Nur
+// failure/timed_out auf dem eigenen Merge-Commit (bzw. ein roter Smoke) sind ein
+// Beleg — nur dafür darf die onSmokeFailure-Policy laufen. `enum` steht wie im
+// PRCHECK_SCHEMA bewusst NEBEN `type`: bares enum nutzt sonst kein Schema dieser
+// Datei, die Engine-Toleranz dafür ist unverifiziert. postMergeGreen entfällt
+// ersatzlos — zwei Wahrheitsquellen könnten sich widersprechen.
 const GATE_SCHEMA = {
-  type: 'object', required: ['merged', 'postMergeGreen'], additionalProperties: false,
-  properties: { merged: { type: 'boolean' }, postMergeGreen: { type: 'boolean', description: 'false = main-CI oder Smoke nach dem Merge rot; onSmokeFailure-Policy wurde ausgeführt' }, note: { type: 'string' } },
+  type: 'object', required: ['merged', 'postMerge'], additionalProperties: false,
+  properties: {
+    merged: { type: 'boolean' },
+    postMerge: {
+      type: 'string', enum: ['green', 'red', 'unmeasured'],
+      description: 'green = abgeschlossener Post-Merge-Lauf mit conclusion success (plus Smoke, falls gesetzt); red = conclusion failure oder timed_out AUF DEM EIGENEN Merge-Commit bzw. roter Smoke — onSmokeFailure-Policy wurde ausgeführt; unmeasured = kein abgeschlossener eigener Lauf mit verwertbarem Urteil (cancelled/skipped/neutral/…, auch nach Neubestimmung) — KEINE Policy, KEIN Revert',
+    },
+    note: { type: 'string' },
+  },
 }
 // Weltzustand statt Agent-Prosa (Issue #31, löst #33): der Builder-Return ist
 // eine BEHAUPTUNG. Fällt der Bash-Permission-Classifier aus, endet der Agent
@@ -290,14 +304,34 @@ const gateWaitPrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist die GATE-WAI
 2. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget), danach Fehler werfen, dessen Text mit "GATE:" beginnt.
 Return { green: true } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün".`
 
-const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station für PR #${pr} (Issue #${n}). Sie läuft IM Merge-Lock (andere Einheiten warten auf dich — zügig, keine Nebenaufgaben); die GATE-WAIT-Station hat die Checks bereits grün gemeldet.
+// Post-Merge-Beweis (Issue #32): Bis 0.7.0 war jeder nicht-grüne CI-Lauf auf dem
+// Default-Branch "rot" — auch ein ABGEBROCHENER. Lauf wf_1121fbd9-e9e (2026-08-01,
+// academic-research, parallelism 3): eine concurrency-Regel mit cancel-in-progress
+// auf main ließ den nächsten Merge den Post-Merge-Lauf des vorherigen killen
+// (conclusion "cancelled"), der Runner las das als Fehlschlag, öffnete einen
+// Revert-PR gegen einen fehlerfreien Merge und stoppte den Lauf mit fünf
+// lauffähigen Einheiten in der Queue. main war nie kaputt. Jetzt: (1) Anker ist der
+// eigene Merge-Commit statt "die letzten drei Läufe", (2) conclusion wird erst nach
+// status == completed interpretiert, (3) nur failure/timed_out auf dem eigenen
+// Merge-Commit sind ein Beleg. Ein OBERMENGEN-Lauf (enthält den eigenen Commit plus
+// fremde) darf nur GRÜN bestätigen — sein Rot kann von einem fremden Commit stammen,
+// und ein Revert des eigenen, fehlerfreien Squash-Commits wäre exakt der Schaden aus
+// #32 in neuer Form. Bleibt es unbestimmt, ist das Ergebnis "unmeasured": kein
+// Revert ohne Beleg, kein Stop des Laufs.
+const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station für PR #${pr} (Issue #${n}). Sie läuft IM Merge-Lock (andere Einheiten warten auf dich — zügig, keine Nebenaufgaben; Ausnahme: der Post-Merge-Beweis in Schritt 5, für den du bis zu 10 Minuten warten SOLLST — abgekürztes Warten liefert keinen Befund, sondern nur ein stilles "unmeasured"); die GATE-WAIT-Station hat die Checks bereits grün gemeldet.
 1. Erster grüner Durchlauf = mergen, keine Re-Trigger-Jagd. Vorher: kein ${C.overrideLabel || 'override'}-Label auf dem PR; malformed-tree-Check (git ls-tree -r HEAD | awk '{print $4}' | sort | uniq -d muss leer sein); Checks-Stand gegenprüfen (gh pr checks ${pr} -R ${SLUG} — sind sie entgegen der Wait-Meldung nicht mehr grün, Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt).
 2. Ist der Branch BEHIND ${BRANCH}: in einem eigenen Worktree (git fetch origin && git worktree add <tmp> ${branch}) git merge origin/${BRANCH} in den Branch (KEIN rebase, KEIN force), Ergebnis via ${PUSH} pushen, Worktree entfernen; danach erneut auf Grün warten (gh pr checks ${pr} -R ${SLUG} --watch, INNERHALB dieses Locks, Wartezeit insgesamt maximal 45 Minuten — Timeout oder FAILURE nach dem BEHIND-Update: Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt); max ${Math.max(2, PAR)} Zyklen — BEHIND zählt NIE als inhaltlicher Fehler.
 2b. KONFLIKT-Zweig (git merge origin/${BRANCH} endet non-zero): Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt — reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht): beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 2. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, Worktree entfernen (es bleibt NIE ein halb-gemergter Zustand zurück), dann Fehler werfen, dessen Text mit "GATE: Merge-Konflikt" beginnt und die Konfliktdateien auflistet. Ein wiederkehrender Konflikt zählt auf den Zyklus-Cap aus Schritt 2 und endet als GATE:-Fehler, nie als Endlosschleife.
 3. gh pr merge ${pr} --squash --delete-branch -R ${SLUG}.
 4. Unabhängig verifizieren: gh pr view ${pr} -R ${SLUG} --json state,mergedAt — merged gilt NUR, wenn gh es sagt.
-5. Post-Merge-Beweis: gh run list -R ${SLUG} --branch ${BRANCH} --limit 3 abwarten/sichten${C.commands.smoke ? `; Smoke: ${C.commands.smoke}` : ''}. Alles grün → postMergeGreen: true. Sonst postMergeGreen: false UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Grund immer in note.
-Return { merged, postMergeGreen } erst nach Schritt 4/5.`
+5. Post-Merge-Beweis — Anker ist der EIGENE Merge-Commit, nicht "die letzten Läufe". Das Warten in 5b-5e ist zusammen auf 10 Minuten gedeckelt (es liegt im Merge-Lock, siehe Präambel).
+5a. SHA holen: gh pr view ${pr} -R ${SLUG} --json mergeCommit -q .mergeCommit.oid. Kommt nichts zurück, kurz warten und erneut abfragen; bleibt es leer, ist der Befund unbestimmt (5f), nie rot.
+5b. Läufe zu diesem SHA: gh run list -R ${SLUG} --branch ${BRANCH} --limit 20 --json databaseId,headSha,status,conclusion,createdAt,workflowName — davon zählen NUR die mit headSha == <SHA>; das ist exakt dein Stand. Ist noch keiner da, innerhalb des Caps nachfassen (das Merge-Event legt sie erst an).
+5c. status ABWARTEN, bevor du irgendetwas wertest: jeder dieser Läufe muss status == "completed" sein — gh run view <ID> -R ${SLUG} --json status,conclusion wiederholt abfragen (Bash mit großzügigem timeout, bei Timeout erneut), bis der 10-Minuten-Cap erreicht ist. "läuft noch" oder "hängt seit X Minuten" ist KEIN Befund und nie ein Grund für die Policy. Das Warten läuft im Merge-Lock — solange niemand sonst mergt, kann eine concurrency-Regel mit cancel-in-progress deinen Lauf gar nicht erst abbrechen.
+5d. conclusion werten (gh run schreibt sie KLEIN, anders als gh pr checks --json): success = grün. failure oder timed_out = ROT. JEDER andere Wert (cancelled, skipped, neutral, action_required, stale, startup_failure) ist keine Messung, sondern unbestimmt — nicht rot, weiter mit 5e.
+5e. NEUBESTIMMUNG über einen OBERMENGEN-Lauf, nur wenn 5d unbestimmt blieb: git fetch origin, dann aus gh run list -R ${SLUG} --branch ${BRANCH} --limit 20 --json databaseId,headSha,status,conclusion,createdAt den jüngsten Lauf mit status == "completed" nehmen, dessen Commit deinen Merge-Commit ENTHÄLT — Prüfung: git merge-base --is-ancestor <SHA> <headSha> (Exit 0 = enthalten). Dieser Lauf testet deinen Stand PLUS fremde Commits, deshalb gilt er nur in EINE Richtung: conclusion success = grün (dein Stand ist mitgetestet und war in Ordnung). conclusion failure/timed_out ist NICHT dein Befund — der Fehler kann von einem fremden Commit stammen, ein Revert deines fehlerfreien Squash-Commits wäre der teurere Fehler: unbestimmt (5f), NIE rot, NIE Revert. Kein passender Lauf: innerhalb des Caps nachfassen, danach unbestimmt.
+5f. Ergebnis: grün${C.commands.smoke ? ` UND Smoke grün (${C.commands.smoke} — schlägt er fehl, ist das ein echter roter Befund)` : ''} → postMerge: "green". Rot → postMerge: "red" UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Unbestimmt geblieben → postMerge: "unmeasured": KEINE Policy, KEIN Revert, KEIN Issue — bei "unmeasured" ist note PFLICHT (Lauf-ID, headSha und conclusion hinein), sonst steht im Bericht ein stummer Zustand. Grund immer in note.
+Return { merged, postMerge } erst nach Schritt 4/5. "red" nur mit einem abgeschlossenen Lauf AUF DEINEM EIGENEN Merge-Commit mit conclusion failure/timed_out (oder rotem Smoke) als Beleg — im Zweifel "unmeasured".`
 
 const learnPrompt = (n, pr, u) => `${PRE}Du bist die LEARNINGS-Station für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert). Du destillierst das ÜBERTRAGBARE Wissen dieser Einheit für spätere Läufe. Du implementierst NICHTS, pushst nichts, kommentierst nichts auf GitHub.
 1. Quellen: gh pr view ${pr} -R ${SLUG} --json title,body,comments und gh pr diff ${pr} -R ${SLUG} (die Review-/AC-Verify-Kommentare sind die ergiebigste Quelle — dort steht, was beim ersten Anlauf schiefging).
@@ -444,7 +478,15 @@ const runUnit = async (u) => {
       LOG(`#${n} Learnings-Destillat übersprungen: ${e && e.message ? e.message : String(e)}`)
     }
   }
-  return { pr, fixRounds, postMergeRed: gate.postMergeGreen === false, note: gate.note || '' }
+  // Unbekannter/fehlender Wert fällt bewusst auf 'unmeasured', nicht auf 'red':
+  // ohne Beleg wird nicht revertet und nicht gestoppt (Issue #32).
+  const pm = ['green', 'red', 'unmeasured'].includes(gate.postMerge) ? gate.postMerge : 'unmeasured'
+  if (pm !== gate.postMerge) LOG(`#${n} Merge-Station lieferte postMerge=${JSON.stringify(gate.postMerge)} — als "unmeasured" gewertet (kein Revert ohne Beleg).`)
+  // note ist bei 'unmeasured' die EINZIGE operator-sichtbare Evidenz; das Schema
+  // kann sie nicht erzwingen (required würde die anderen zwei Zustände mitfangen),
+  // deshalb hier ein Ersatztext statt eines stummen Eintrags im Bericht.
+  const gateNote = gate.note || (pm === 'unmeasured' ? 'unmeasured ohne Begründung der Merge-Station' : '')
+  return { pr, fixRounds, postMerge: pm, note: gateNote }
 }
 
 let mergeChain = Promise.resolve()
@@ -583,9 +625,11 @@ const worker = async () => {
       // ein Budget-Abbruch zählt hoch: er hat Tokens verbrannt, aber nichts
       // gemergt. Drei davon in Folge heißen "die Budgets sind falsch kalibriert".
       noteOutcome(!res.budgetExceeded, u, `Budget-Abbruch ohne Merge: ${res.note || ''}`)
-      if (res.postMergeRed) {
+      if (res.postMerge === 'red') {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
         LOG(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
+      } else if (res.postMerge === 'unmeasured') {
+        LOG(`#${u.n} Post-Merge-Lauf ohne verwertbares Urteil (abgebrochen/übersprungen oder nur über einen Obermengen-Lauf sichtbar) — keine onSmokeFailure-Policy, kein Stop, Lauf fährt fort: ${res.note}`)
       }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)

@@ -19,7 +19,27 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   error); a merge or a gh-verified skip resets the counter, blocked units do
   not count. Default 3, `0` disables it. (#31)
 
+### Changed
+- The merge station's post-merge proof is now three-valued: the gate return
+  changed from `postMergeGreen: boolean` to
+  `postMerge: "green" | "red" | "unmeasured"`, and run reports carry
+  `done[].postMerge` instead of `done[].postMergeRed`. Operators who parse
+  `.flowkit/runs/*.json` need to adapt. (#32)
+
 ### Fixed
+- Post-merge proof no longer treats a cancelled CI run as a failure (#32). The
+  merge station anchors on the PR's own merge commit
+  (`gh pr view --json mergeCommit`), waits for `status: completed` before
+  reading `conclusion`, and only `failure`/`timed_out` on that commit (or a red
+  smoke command) trigger the `onSmokeFailure` policy. Any other conclusion is
+  re-measured against the most recent completed default-branch run that
+  contains the merge commit — the usual case under
+  `concurrency: cancel-in-progress`, where the next merge kills the previous
+  post-merge run. That run also covers foreign commits, so it may only confirm
+  green: a red result there stays inconclusive instead of reverting a healthy
+  squash commit. If it stays inconclusive the unit reports
+  `postMerge: "unmeasured"`: no revert PR, no run stop, just a log line and the
+  field in the report.
 - A builder that produced no PR — e.g. because the Bash permission classifier
   was unavailable — is a technical error instead of a silent success, a
   reported `pr: 0` is healed from the gh result instead of failing the unit,

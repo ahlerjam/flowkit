@@ -2,7 +2,8 @@
 // Testet die Scheduler-Logik von workflows/implement.workflow.js (pickNext,
 // Cap-Kohärenz, tote Blocker, Zyklus-Erkennung, WAIT-Signal, withMergeLock,
 // per-Issue-Budget-Deckel, Lauf-Gesamtdeckel inkl. deferredByBudget,
-// Learnings-Station, needs-human, Stop nach doppeltem technischem Fehler,
+// Learnings-Station, Post-Merge-Dreiwertigkeit (green/red/unmeasured),
+// needs-human, Stop nach doppeltem technischem Fehler,
 // PR-Check-Station gegen den Weltzustand, Fortschritts-Circuit-Breaker,
 // Allowlist-taugliche Quotierung der Plugin-Script-Pfade) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
@@ -46,7 +47,7 @@ const defaultResponse = (label) => {
   if (/^ac-verify/.test(label)) return { pass: true, unmet: [] }
   if (/^security/.test(label)) return { blockers: [] }
   if (/^gate-wait /.test(label)) return { green: true }
-  if (/^gate-merge /.test(label)) return { merged: true, postMergeGreen: true }
+  if (/^gate-merge /.test(label)) return { merged: true, postMerge: 'green' }
   return {} // plan, fix*, cleanup, needs-human, budget-abort: Ergebnis ungenutzt
 }
 
@@ -144,7 +145,7 @@ test('Happy path: 2 Einheiten, parallelism 1 — beide merged, done korrekt', as
   assert.equal(d1.pr, 101)
   assert.equal(d2.pr, 102)
   assert.equal(d1.fixRounds, 0)
-  assert.equal(d1.postMergeRed, false)
+  assert.equal(d1.postMerge, 'green')
   only(calls, 'preflight')
   // parallelism 1: Einheit 2 startet erst nach dem Merge von Einheit 1
   assert.ok(only(calls, 'gate-merge #1').endSeq < only(calls, 'plan #2').startSeq,
@@ -244,7 +245,7 @@ test('Merge-Lock: gate-merge nie überlappend, gate-wait parallel', async () => 
         mergeActive += 1; mergeMax = Math.max(mergeMax, mergeActive)
         await sleep(30)
         mergeActive -= 1
-        return { merged: true, postMergeGreen: true }
+        return { merged: true, postMerge: 'green' }
       }
       return undefined
     },
@@ -716,6 +717,113 @@ test('Cleanup-Aufruf passt auf das Allowlist-Präfix (unquoted normal, quoted nu
   const spaced = await runWorkflow({ units: [unit(1)], config: cfg(), pluginRoot: '/opt/my plugins/flowkit' })
   assert.ok(only(spaced.calls, 'cleanup #1').prompt.includes('bash "/opt/my plugins/flowkit/scripts/cleanup-worktrees.sh" --branch'),
     'Pfade mit Leerzeichen müssen weiterhin gequotet werden')
+})
+
+// ---------------------------------------------------------------------------
+// Post-Merge-Dreiwertigkeit (Issue #32)
+// ---------------------------------------------------------------------------
+
+// 22. Ein abgebrochener Post-Merge-Lauf ist keine Messung: keine Policy, kein
+//     Stop, die Queue läuft weiter. Bis 0.7.0 stoppte genau das den ganzen Lauf.
+test('Post-Merge unmeasured: kein Revert-Signal, kein Stop, Lauf fährt fort', async () => {
+  const { report, logs } = await runWorkflow({
+    units: [unit(1), unit(2)],
+    config: cfg(),
+    respond: (c) => (c.label === 'gate-merge #1'
+      ? { merged: true, postMerge: 'unmeasured', note: 'run 30697078974 cancelled, keine Neubestimmung im Cap' }
+      : undefined),
+  })
+  assert.equal(doneOf(report, 1).postMerge, 'unmeasured')
+  assert.equal(report.stopped, null, 'eine fehlende Messung darf den Lauf nicht anhalten')
+  assert.equal(doneOf(report, 2).pr, 102, 'die zweite Einheit muss regulär durchlaufen und mergen')
+  assert.deepEqual(report.failed, [])
+  assert.ok(logs.some((l) => /ohne verwertbares Urteil/.test(l)), 'der unmeasured-Zweig muss im Log stehen')
+  assert.ok(logs.some((l) => /run 30697078974 cancelled/.test(l)), 'die note der Station gehört in den Log-Eintrag')
+})
+
+// 23. Gegenstück: das Sicherheitsnetz bleibt scharf. Ein BELEGT roter Lauf stoppt
+//     weiterhin sofort — die Dreiwertigkeit weicht es nicht auf.
+test('Post-Merge red: Policy-Stop bleibt erhalten, keine weiteren Merges', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2)],
+    // onSmokeFailure explizit gesetzt: sonst prüfte die Assertion den hartkodierten
+    // Fallback 'revert' statt der CONFIG.
+    config: cfg({ onSmokeFailure: 'p0-issue' }),
+    respond: (c) => (c.label === 'gate-merge #1'
+      ? { merged: true, postMerge: 'red', note: 'run 42 conclusion failure' }
+      : undefined),
+  })
+  assert.ok(report.stopped && report.stopped.issue === 1, 'ein belegt roter Post-Merge-Lauf muss den Lauf stoppen')
+  assert.ok(/Post-Merge rot/.test(report.stopped.reason), report.stopped.reason)
+  assert.ok(/p0-issue/.test(report.stopped.reason), 'der Policy-Name aus der CONFIG gehört in den Stop-Grund')
+  assert.equal(doneOf(report, 1).postMerge, 'red')
+  none(calls, /^gate-merge #2/)
+})
+
+// 24. Ein unbekannter Wert (Schema-Ausrutscher der Engine) fällt in die NICHT
+//     destruktive Richtung — nicht nach 'red', also kein Revert ohne Beleg. Und
+//     ein stummes 'unmeasured' bekommt einen Ersatztext, sonst steht im Bericht
+//     ein Zustand ohne jede Evidenz.
+test('Post-Merge: unbekannter Wert wird zu unmeasured normalisiert, note nie leer', async () => {
+  const { report, logs } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (c.label === 'gate-merge #1' ? { merged: true, postMerge: 'grün' } : undefined),
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.postMerge, 'unmeasured')
+  assert.equal(d1.note, 'unmeasured ohne Begründung der Merge-Station')
+  assert.equal(report.stopped, null)
+  assert.ok(logs.some((l) => /als "unmeasured" gewertet/.test(l)), 'die Normalisierung muss im Log auftauchen')
+})
+
+// 25. Die eigentliche Logik lebt im Prompt-String — nur eine Assertion darauf
+//     merkt, wenn er später stillschweigend zurückgedreht wird.
+test('Merge-Prompt: wartet auf completed, wertet cancelled nicht als Fehlschlag, Obermenge nur grün', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const p = only(calls, 'gate-merge #1').prompt
+  assert.ok(p.includes('mergeCommit'), 'Anker fehlt: der Beweis hängt am eigenen Merge-Commit')
+  assert.ok(p.includes('status == "completed"'), 'der conclusion-Wert darf erst nach Abschluss gelesen werden')
+  assert.ok(p.includes('failure oder timed_out = ROT'), 'die rote Menge muss abschließend benannt sein')
+  assert.ok(/cancelled/.test(p) && /keine Messung/.test(p), 'cancelled muss ausdrücklich KEIN Fehlschlag sein')
+  assert.ok(p.includes('merge-base --is-ancestor'), 'die Neubestimmung über den Obermengen-Lauf fehlt')
+  assert.ok(/OBERMENGEN-Lauf/.test(p) && /NIE rot, NIE Revert/.test(p),
+    'ein Obermengen-Lauf darf nur grün bestätigen — sein Rot kann von einem fremden Commit stammen')
+  assert.ok(p.includes('postMerge: "unmeasured"'), 'der dritte Zustand muss eingefordert werden')
+  assert.ok(p.includes('Ausnahme: der Post-Merge-Beweis in Schritt 5'),
+    'ohne die Präambel-Ausnahme gewinnt "zügig, keine Nebenaufgaben" und das Warten wird abgekürzt')
+  assert.ok(!p.includes('--limit 3'), 'der alte, unverankerte gh-run-list-Aufruf darf nicht stehenbleiben')
+})
+
+// 26. Smoke-Zweig des Prompts: der einzige Ort, an dem "roter Smoke = echter
+//     roter Befund" steht — cfg() setzt commands.smoke sonst nie.
+test('Merge-Prompt: konfigurierter Smoke ist ein echter roter Befund', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ commands: { test: 'npm test', lint: 'npm run lint', smoke: 'npm run smoke' } }),
+  })
+  const p = only(calls, 'gate-merge #1').prompt
+  assert.ok(p.includes('UND Smoke grün (npm run smoke'), 'der konfigurierte Smoke muss Teil der Grün-Bedingung sein')
+  assert.ok(p.includes('ist das ein echter roter Befund'), 'ein roter Smoke ist ein Beleg, keine fehlende Messung')
+  // Gegenprobe: ohne commands.smoke darf der Zweig gar nicht auftauchen.
+  const plain = await runWorkflow({ units: [unit(1)], config: cfg() })
+  assert.ok(!only(plain.calls, 'gate-merge #1').prompt.includes('UND Smoke grün'),
+    'ohne konfigurierten Smoke entfällt der Zweig ersatzlos')
+})
+
+// 27. Vertrag zum Schema-Literal (die Mock-Engine validiert NICHT — der Test
+//     sichert die Form des Literals, nicht die Akzeptanz durch die echte Engine).
+test('GATE_SCHEMA: dreiwertiges postMerge statt boolean postMergeGreen', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const s = only(calls, 'gate-merge #1').opts.schema
+  assert.ok(s.required.includes('postMerge'), 'postMerge muss Pflichtfeld sein')
+  assert.ok(!s.required.includes('postMergeGreen'), 'postMergeGreen entfällt ersatzlos')
+  assert.equal(s.properties.postMergeGreen, undefined)
+  assert.deepEqual(s.properties.postMerge.enum, ['green', 'red', 'unmeasured'])
+  // type NEBEN enum: kein anderes Schema der Datei nutzt bares enum, die
+  // Engine-Toleranz dafür ist unverifiziert.
+  assert.equal(s.properties.postMerge.type, 'string')
+  assert.equal(s.additionalProperties, false, 'der Agent darf den Zustand nicht an der Enum vorbei melden')
 })
 
 // ---------------------------------------------------------------------------

@@ -108,7 +108,8 @@
         "pause-cd",
         "p0-issue"
       ],
-      "default": "revert"
+      "default": "revert",
+      "description": "Reaktion auf einen BELEGT roten Post-Merge-Lauf: abgeschlossener CI-Lauf (status completed) auf dem eigenen Merge-Commit mit conclusion failure oder timed_out bzw. roter commands.smoke. Ein abgebrochener/übersprungener Lauf (cancelled, skipped, neutral, ...) ist eine fehlende Messung, keine Rotmeldung — er wird über den jüngsten abgeschlossenen Lauf neu bestimmt, der den eigenen Merge-Commit enthält, und weil dieser auch fremde Commits testet, bestätigt er nur Grün. Diese Policy löst er nie aus."
     },
     "budgets": {
       "type": "object",
