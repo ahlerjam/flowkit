@@ -39,6 +39,36 @@ jobs:
       - name: review-pipeline-steps (shell-logic of the pr-deep-review template)
         run: bash scripts/test-review-pipeline-steps.sh
 
+      # Der Offline-Test oben (Sektion (e)) vergleicht das Template gegen eine
+      # Konstante. Hier wird die Konstante gegen die Wirklichkeit geprüft:
+      # zeigt der Versionskommentar wirklich auf diesen Commit? Blockiert NUR
+      # bei echtem Mismatch; API-/Netzprobleme geben eine Warnung. Die
+      # Staleness-Meldung ist bewusst nicht blockierend — sonst würde das
+      # nächste Upstream-Release jeden unbeteiligten PR rot färben.
+      - name: claude-code-action pin resolves to its version comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pin="$(grep -m1 -oE 'anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+' templates/ci/pr-deep-review.yml.template)"
+          sha="${pin#*@}"; sha="${sha%% *}"
+          ver="${pin##*# }"
+          echo "Template pin: $ver -> $sha"
+          if ! upstream="$(gh api "repos/anthropics/claude-code-action/commits/$ver" --jq .sha 2>/tmp/ghpin.err)"; then
+            echo "::warning::Could not resolve $ver upstream (network/API) — SHA vs. version comment left unverified"
+            cat /tmp/ghpin.err || true
+            exit 0
+          fi
+          if [ "$upstream" != "$sha" ]; then
+            echo "::error::Pin mismatch: $ver points at $upstream upstream, the template pins $sha"
+            exit 1
+          fi
+          echo "SHA and version comment agree."
+          latest="$(gh api --paginate repos/anthropics/claude-code-action/tags --jq '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          if [ -n "$latest" ] && [ "$latest" != "$ver" ]; then
+            echo "::warning::claude-code-action pin is $ver, newest upstream is $latest — bump instructions at the top of scripts/test-review-pipeline-steps.sh, section (e)"
+          fi
+
       - name: Validate implement.workflow.js syntax
         run: |
           set -euo pipefail

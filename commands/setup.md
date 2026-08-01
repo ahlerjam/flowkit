@@ -117,6 +117,76 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    nach `.github/scripts/flowkit_review/`, beide setup-Actions
    (`${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-claude-action`,
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-python-uv`) nach `.github/actions/`.
+
+   **Downgrade-Schutz für den `anthropics/claude-code-action`-Pin:** läuft in
+   zwei Teilen um das Kopieren herum, weil Teil 1 den ALTEN Stand lesen muss,
+   BEVOR er überschrieben wird. Die beiden Versionen NICHT selbst vergleichen
+   (`v1.0.9` sieht lexikalisch neuer aus als `v1.0.183`, ist es aber nicht) —
+   die folgenden Blöcke WÖRTLICH ausführen, nicht paraphrasieren.
+
+   TEIL 1 — VOR dem Überschreiben von `.github/workflows/pr-deep-review.yml`:
+   `PIN_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/templates/ci/pr-deep-review.yml.template"`
+   und `PIN_INSTALLED=".github/workflows/pr-deep-review.yml"` setzen, dann:
+
+   ```bash
+   # flowkit:action-pin-guard (Beginn)
+   # Eingaben: PIN_TEMPLATE (Pflicht), PIN_INSTALLED (Default unten, Datei darf fehlen).
+   # Ausgabe: vier key=value-Zeilen auf stdout. Exit 2 nur, wenn das TEMPLATE
+   # selbst keinen Pin hat — dann Schritt 6 abbrechen und im Bericht melden.
+   : "${PIN_TEMPLATE:?PIN_TEMPLATE (Pfad zum pr-deep-review.yml.template) muss gesetzt sein}"
+   PIN_INSTALLED="${PIN_INSTALLED:-.github/workflows/pr-deep-review.yml}"
+   PIN_RE='anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+'
+   tpl_pin="$(grep -m1 -oE "$PIN_RE" "$PIN_TEMPLATE" 2>/dev/null || true)"
+   if [ -z "$tpl_pin" ]; then echo "pin_decision=error-no-template-pin"; exit 2; fi
+   tpl_ver="${tpl_pin##*# }"
+   cur_pin=""
+   if [ -f "$PIN_INSTALLED" ]; then
+     cur_pin="$(grep -m1 -oE "$PIN_RE" "$PIN_INSTALLED" 2>/dev/null || true)"
+   fi
+   if [ -z "$cur_pin" ]; then
+     printf 'pin_decision=no-installed-pin\npin_template=%s\npin_installed=-\npin_keep_sha=-\n' "$tpl_ver"
+     exit 0
+   fi
+   cur_sha="${cur_pin#*@}"; cur_sha="${cur_sha%% *}"; cur_ver="${cur_pin##*# }"
+   newest="$(printf '%s\n%s\n' "$tpl_ver" "$cur_ver" | sort -V | tail -1)"
+   if [ "$newest" = "$cur_ver" ] && [ "$cur_ver" != "$tpl_ver" ]; then
+     printf 'pin_decision=keep-installed\npin_template=%s\npin_installed=%s\npin_keep_sha=%s\n' "$tpl_ver" "$cur_ver" "$cur_sha"
+   else
+     printf 'pin_decision=template\npin_template=%s\npin_installed=%s\npin_keep_sha=-\n' "$tpl_ver" "$cur_ver"
+   fi
+   # flowkit:action-pin-guard (Ende)
+   ```
+
+   Die vier Ausgabezeilen (`pin_decision`, `pin_template`, `pin_installed`,
+   `pin_keep_sha`) für den Abschlussbericht (Schritt 8) merken. Bei
+   `pin_decision=error-no-template-pin` Schritt 6 abbrechen und im Bericht
+   melden — das Template selbst hat keinen gültigen Pin, das kommt nur bei
+   einem kaputten Plugin-Stand vor.
+
+   TEIL 2 — NACH dem Kopieren, NUR bei `pin_decision=keep-installed`: die
+   beiden erhaltenswerten Werte aus Teil 1 in Variablen übernehmen
+   (`PIN_KEEP_SHA=<pin_keep_sha aus Teil 1>`,
+   `PIN_KEEP_VER=<pin_installed aus Teil 1>` — Werte einsetzen, nicht als Text
+   im Befehl stehen lassen) und dann WÖRTLICH:
+
+   ```bash
+   # flowkit:action-pin-restore (Beginn)
+   : "${PIN_KEEP_SHA:?PIN_KEEP_SHA (der zu erhaltende SHA aus Teil 1, Feld pin_keep_sha) muss gesetzt sein}"
+   : "${PIN_KEEP_VER:?PIN_KEEP_VER (der zugehörige Versionskommentar aus Teil 1, Feld pin_installed) muss gesetzt sein}"
+   PIN_INSTALLED="${PIN_INSTALLED:-.github/workflows/pr-deep-review.yml}"
+   sed -E -i.flowkitbak \
+     "s|anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+|anthropics/claude-code-action@${PIN_KEEP_SHA} # ${PIN_KEEP_VER}|g" \
+     "$PIN_INSTALLED"
+   rm -f "${PIN_INSTALLED}.flowkitbak"
+   # flowkit:action-pin-restore (Ende)
+   ```
+
+   Bei `pin_decision=template` (auch bei Gleichstand) bleibt der Template-Pin
+   stehen, Teil 2 entfällt. Bei `pin_decision=no-installed-pin` — bestehende
+   Datei ohne SHA-Pin, z. B. ein beweglicher `@v1`-Tag — gewinnt ebenfalls das
+   Template; das ist eine Härtung, kein Downgrade. In jedem Fall eine Zeile
+   für den Abschlussbericht merken.
+
    Platzhalter aus `.github/flowkit-review.json` (aus Template anlegen) ersetzen.
    Neue Config-Keys mit dem Operator klären: `criticalPaths` (Array von
    Pfad-Präfixen, deren Änderungen die Reviewer auf P1 eskalieren — z. B.
@@ -146,5 +216,9 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    jeden Merge blockiert. Danach `actionlint`, falls installiert.
 7. **.gitignore:** Zeile `.flowkit/` ergänzen.
 8. **Abschlussbericht:** was angelegt/geändert/übersprungen wurde, als Chat-Ausgabe;
-   Änderungen im Zielrepo als Branch + PR (Titel "chore: install flowkit"), NICHT
-   direkt auf den Default-Branch.
+   bei installiertem CI-Gate ZWINGEND eine Zeile zum `claude-code-action`-Pin —
+   welche Version jetzt in `.github/workflows/pr-deep-review.yml` steht,
+   welche das Template mitbringt, und bei `pin_decision=keep-installed`
+   ausdrücklich „neuerer Pin im Zielrepo beibehalten, Template-Pin
+   `<pin_template>` ist älter"; Änderungen im Zielrepo als Branch + PR (Titel
+   "chore: install flowkit"), NICHT direkt auf den Default-Branch.

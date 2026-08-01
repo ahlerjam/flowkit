@@ -37,6 +37,13 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   silently and the state only shows up in the run report); `/flowkit:status`
   lists the queue and a new `merge-blocked` / `post-merge-unmeasured` tally, and
   the SessionStart hook points at a manual merge instead of a resume. (#37)
+- Pin registry test: every `uses: anthropics/claude-code-action@…` line in the
+  CI template must be byte-identical to one canonical, SHA-pinned line, and a
+  separate check rejects a moving tag (`@v1`, `@main`, …) at any of those
+  positions. CI also resolves the pinned SHA against its version comment
+  upstream and warns (non-blocking) once a newer tag exists. Pins drifting
+  apart or a half-finished bump now fail the build instead of going unnoticed
+  for 46 patch releases, which is what happened before this fix. (#38)
 
 ### Changed
 - The merge station's post-merge proof is now three-valued: the gate return
@@ -56,6 +63,12 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   cheapest model in the pipeline, not the hard server-side block the draft
   state used to be. PRs an earlier flowkit version left as draft are healed on
   `resume`; without it, a manual `gh pr ready <N>` is still required. (#35)
+- `/flowkit:setup` no longer silently downgrades the `claude-code-action` CI
+  pin: before overwriting an existing `.github/workflows/pr-deep-review.yml`
+  it compares the installed pin's version against the template's with
+  `sort -V` (never a lexical guess — `v1.0.9` looks newer than `v1.0.183` but
+  is not), keeps a newer installed pin, and reports which pin ended up
+  installed. (#38)
 
 ### Fixed
 - Post-merge proof no longer treats a cancelled CI run as a failure (#32). The
