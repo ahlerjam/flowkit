@@ -40,6 +40,18 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   squash commit. If it stays inconclusive the unit reports
   `postMerge: "unmeasured"`: no revert PR, no run stop, just a log line and the
   field in the report.
+- Gate-wait no longer burns the full 45-minute window on a PR that can never
+  report a green required check: it resolves the draft state first
+  (`gh pr view --json isDraft,headRefOid`, then `gh pr ready` — the deep-review
+  pipeline skips drafts by design, so the required check comes back SKIPPED
+  instead of SUCCESS), counts the workflow runs on the PR's own head SHA when gh
+  reports "no checks reported" and re-triggers exactly once. A station that does
+  not go green now returns `{ green: false, draftAtEntry, runsFound,
+  retriggered, note }` instead of throwing, the resulting `GATE:` message names
+  all three, and the needs-human comment repeats the reason verbatim instead of
+  paraphrasing it away. The same three fields are reported as `done[].gateDiag`
+  on the success path too — otherwise the most common case, a draft the station
+  quietly healed, would leave no trace in `.flowkit/runs/*.json`. (#34)
 - A builder that produced no PR — e.g. because the Bash permission classifier
   was unavailable — is a technical error instead of a silent success, a
   reported `pr: 0` is healed from the gh result instead of failing the unit,

@@ -355,6 +355,121 @@ test('needs-human: GATE-Fehler stoppt die Einheit, nicht den Lauf', async () => 
   assert.equal(report.stopped, null)
 })
 
+// 8b. Gate-Wait, Schritt 1: der Draft-Zustand wird geklärt, BEVOR gewartet wird.
+//     Ein Draft-PR kann per Design keinen grünen Pflicht-Check liefern (der
+//     prep-Job der Review-Pipeline ist auf draft == false gefiltert) — 45 Minuten
+//     darauf zu warten war der teuerste Leerlauf des Vorfalls.
+test('Gate-Wait: Draft-Check und gh pr ready stehen vor der Warteschleife', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg({ mergeCheck: 'coordinator' }) })
+  const p = only(calls, 'gate-wait #1').prompt
+  assert.ok(p.includes('gh pr view 101 -R acme/demo --json isDraft'), 'der Draft-Zustand muss überhaupt abgefragt werden')
+  assert.ok(/SKIPPED/.test(p), 'ein übersprungener Pflicht-Check darf nie als grün durchgehen')
+  const iDraft = p.indexOf('isDraft')
+  const iReady = p.indexOf('gh pr ready 101 -R acme/demo')
+  const iWatch = p.indexOf('--watch')
+  assert.ok(iWatch > -1, 'ohne die Warteschleife misst der Reihenfolge-Test nichts')
+  assert.ok(iDraft > -1 && iDraft < iWatch, 'der Draft-Check steht VOR dem --watch, sonst wartet die Station wieder ins Leere')
+  // Nicht nur "kommt vor": das gh pr ready aus dem Re-Trigger (Schritt 3) steht
+  // hinter der Warteschleife und käme 45 Minuten zu spät.
+  assert.ok(iReady > -1 && iReady < iWatch, 'ein Draft muss VOR dem Warten geheilt werden, nicht nur festgestellt')
+})
+
+// 8c. Schritt 3: "keine Checks" wird belegt statt vermutet — gezählt werden nur
+//     Läufe des PR-HEAD-SHA, und der Re-Trigger bleibt auf genau einen gedeckelt.
+//     Dazu der Schema-Vertrag: ohne die Felder in properties verwirft
+//     additionalProperties: false jede Diagnose, required bleibt trotzdem eng.
+test('Gate-Wait: zählt Läufe am HEAD-SHA, triggert genau einmal neu, Schema trägt die Diagnose', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const c = only(calls, 'gate-wait #1')
+  assert.ok(/gh run list -R acme\/demo --branch feat\/1-x/.test(c.prompt), 'ohne Lauf-Zählung bleibt "keine Checks" unbelegt')
+  assert.ok(c.prompt.includes('headSha == <headRefOid'),
+    'ungefiltert zählt jeder fremde Lauf desselben Branch mit — runsFound wäre in Multi-Workflow-Repos immer > 0 und der Re-Trigger tot')
+  assert.ok(/gh pr ready 101 --undo -R acme\/demo/.test(c.prompt), 'der Draft-Toggle ist der Re-Trigger')
+  assert.ok(/GENAU EINEN Re-Trigger/.test(c.prompt), 'eine externe Ursache heilt auch der zweite nicht')
+  const s = c.opts.schema
+  assert.deepEqual(s.required, ['green'], 'Diagnosefelder dürfen NICHT required werden — eine Antwort ohne sie bleibt gültig')
+  assert.equal(s.additionalProperties, false, 'der Agent darf keine freien Felder erfinden')
+  for (const f of ['draftAtEntry', 'runsFound', 'retriggered']) {
+    assert.ok(s.properties[f], `WAIT_SCHEMA.properties.${f} fehlt — additionalProperties: false verwürfe das Feld stillschweigend`)
+  }
+})
+
+// 8d. Der Nutzen der Felder entsteht erst in der Meldung: sie ist der einzige
+//     Draht zum Operator (Issue-Kommentar über needs-human, done[].note im
+//     Bericht). Deshalb beides prüfen, nicht nur den Report.
+test('Gate-Wait ohne Grün: die GATE-Meldung nennt Draft-Zustand, Lauf-Zahl und Re-Trigger', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-wait /.test(c.label)
+      ? { green: false, draftAtEntry: true, runsFound: 0, retriggered: true, note: 'keine Checks nach 45 Minuten' }
+      : undefined),
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(/keine Checks nach 45 Minuten/.test(d1.note), 'die note der Station bleibt erhalten')
+  assert.ok(/Draft beim Eintritt: ja/.test(d1.note))
+  assert.ok(/Workflow-Läufe auf dem Branch: 0/.test(d1.note))
+  assert.ok(/Re-Trigger: ausgeführt/.test(d1.note))
+  const nh = only(calls, 'needs-human #1').prompt
+  assert.ok(/Workflow-Läufe auf dem Branch: 0/.test(nh), 'der Befund muss im Issue-Kommentar landen, nicht nur im Report')
+  assert.ok(/WÖRTLICH/.test(nh), 'ohne die Wörtlich-Regel paraphrasiert der Haiku-Agent die Diagnose weg')
+  assert.equal(report.stopped, null)
+})
+
+// 8e. Absicherung gegen die naive Umsetzung `${wait.draftAtEntry}`: ein fehlendes
+//     Feld (alter oder abgewürgter Agent) muss "unbekannt" ergeben — "undefined"
+//     im Issue-Kommentar ist schlimmer als keine Angabe.
+test('Gate-Wait ohne Diagnosefelder: die Meldung sagt "unbekannt", nie undefined', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-wait /.test(c.label) ? { green: false, note: 'rot' } : undefined),
+  })
+  const note = doneOf(report, 1).note
+  assert.ok(/Draft beim Eintritt: unbekannt/.test(note))
+  assert.ok(/Workflow-Läufe auf dem Branch: unbekannt/.test(note))
+  assert.ok(/Re-Trigger: unbekannt/.test(note))
+  assert.ok(!/undefined/.test(note), 'ein fehlendes Feld darf nie als "undefined" beim Operator landen')
+})
+
+// 8f. Ehrliche Dokumentation des degradierten Pfads: wirft die Station, statt
+//     { green: false, … } zurückzugeben, wird die Diagnose gar nicht erst
+//     gebildet — die Meldung hat dann KEINEN Diagnose-Block. Die Einheit landet
+//     trotzdem wie bisher als needs-human, der Lauf fährt fort. Dieser Fall ist
+//     auch ohne die Änderung grün: er dokumentiert die Grenze der Diagnose,
+//     statt sie zu beweisen (das tun 8b-8e und 8g).
+test('Gate-Wait wirft: needs-human wie bisher, aber ohne Diagnose-Block', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2)],
+    config: cfg(),
+    respond: (c) => { if (c.label === 'gate-wait #1') throw new Error('GATE: Checks nicht grün: Timeout') },
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(d1.note.startsWith('GATE:'))
+  assert.ok(!/Draft beim Eintritt/.test(d1.note),
+    'ein geworfener Fehler transportiert nur einen String — wer den Prompt kürzt, degradiert hierhin zurück')
+  assert.equal(doneOf(report, 2).pr, 102, 'der Lauf fährt nach needs-human fort')
+})
+
+// 8g. Erfolgspfad: ein Draft, den die Station stillschweigend geheilt hat, ist der
+//     häufigste Fall — ohne gateDiag im Return hinterlässt genau er keine Spur.
+test('Gate-Wait grün: gateDiag steht auch im Erfolgsfall im Bericht', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-wait /.test(c.label)
+      ? { green: true, draftAtEntry: true, runsFound: 2, retriggered: false }
+      : undefined),
+  })
+  assert.deepEqual(doneOf(report, 1).gateDiag, { draftAtEntry: true, runsFound: 2, retriggered: false })
+  // Gegenprobe: fehlende Felder werden null (auswertbar), nicht undefined (fällt
+  // beim Serialisieren des Berichts ersatzlos weg).
+  const plain = await runWorkflow({ units: [unit(1)], config: cfg() })
+  assert.deepEqual(doneOf(plain.report, 1).gateDiag, { draftAtEntry: null, runsFound: null, retriggered: null })
+})
+
 // 9. Technischer Doppel-Fehler stoppt den Lauf: build wirft zweimal ohne
 //    GATE-Präfix → ein Requeue-Versuch, dann stopped + failed.
 test('Technischer Doppel-Fehler: ein Requeue, dann Stop mit failed', async () => {

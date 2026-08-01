@@ -198,10 +198,34 @@ const VERIFY_SCHEMA = {
     note: { type: 'string' },
   },
 }
+// additionalProperties: false verwirft jedes Feld, das hier nicht steht — ohne die
+// drei Diagnosefelder (Issue #34) KANN die Station Draft-Zustand und Lauf-Zahl gar
+// nicht melden, egal wie gut der Prompt ist. required bleibt ['green']: eine
+// Antwort ohne Diagnose (abgewürgter Agent) bleibt gültig und schlägt nicht als
+// technischer Fehler durch — sie rendert dann als "unbekannt".
 const WAIT_SCHEMA = {
   type: 'object', required: ['green'], additionalProperties: false,
-  properties: { green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' }, note: { type: 'string' } },
+  properties: {
+    green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' },
+    draftAtEntry: { type: 'boolean', description: 'war der PR beim Eintritt in die Station ein Draft (dann liefert die Review-Pipeline per Design keinen grünen Pflicht-Check) — die Station hat ihn in dem Fall auf ready gesetzt' },
+    runsFound: { type: 'integer', minimum: 0, description: 'Zahl der Workflow-Läufe auf dem PR-HEAD-SHA beim letzten Blick (gh run list --branch, gefiltert auf headSha)' },
+    retriggered: { type: 'boolean', description: 'true, wenn die Station den einen erlaubten Re-Trigger (Draft-Toggle) ausgeführt hat' },
+    note: { type: 'string' },
+  },
 }
+// Diagnose-Kontext der Gate-Wait-Station (Issue #34): bleibt ein PR ohne grünen
+// Pflicht-Check, startet der Operator sonst bei null — im Vorfall kostete allein
+// die Feststellung "der PR war ein Draft" Stunden. runUnit bildet das Objekt VOR
+// dem GATE:-Wurf und gibt es AUCH auf dem Erfolgspfad zurück (done[].gateDiag):
+// ein still geheilter Draft hinterlässt sonst keine Spur, und Auswertungen lesen
+// ein Feld statt Prosa. Fehlendes Feld = null und rendert als "unbekannt" — nie
+// "undefined" und nie stillschweigend "nein"/"0".
+const gateDiagOf = (w) => ({
+  draftAtEntry: w && typeof w.draftAtEntry === 'boolean' ? w.draftAtEntry : null,
+  runsFound: w && Number.isInteger(w.runsFound) ? w.runsFound : null,
+  retriggered: w && typeof w.retriggered === 'boolean' ? w.retriggered : null,
+})
+const gateDiagText = (d) => `(Draft beim Eintritt: ${d.draftAtEntry === null ? 'unbekannt' : d.draftAtEntry ? 'ja' : 'nein'}; Workflow-Läufe auf dem Branch: ${d.runsFound === null ? 'unbekannt' : d.runsFound}; Re-Trigger: ${d.retriggered === null ? 'unbekannt' : d.retriggered ? 'ausgeführt' : 'nein'})`
 // Dreiwertig statt boolean (Issue #32): ein abgebrochener oder übersprungener
 // Post-Merge-Lauf ist KEINE Rotmeldung, sondern eine fehlende Messung. Nur
 // failure/timed_out auf dem eigenen Merge-Commit (bzw. ein roter Smoke) sind ein
@@ -299,10 +323,22 @@ const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter
 // (inkl. erneutem Grün-Warten NACH dem Update — der Branch ist dann wirklich
 // hinter main gewesen, das Re-Warten gehört in den Lock) und den Merge selbst.
 // Ein Merge passiert NIE außerhalb von withMergeLock.
+// Draft-Check und Re-Trigger (Issue #34): die Station wartete bis 0.7.0 blind 45
+// Minuten und hatte danach keinen Befund. Ein Draft-PR kann per Design keinen
+// grünen Pflicht-Check liefern (der prep-Job der Review-Pipeline ist auf
+// draft == false gefiltert, alles Weitere hängt an prep) — das ist eine
+// Verschärfung des Runners gegenüber der Branch-Protection, die einen SKIPPED-Job
+// als erfüllt zählt. Klären kostet Sekunden. Bleiben Läufe ganz aus, ist ein
+// Draft-Toggle der billigste Re-Trigger; er bleibt auf EINEN gedeckelt, weil eine
+// externe Ursache sich davon nicht heilen lässt. Statt zu werfen liefert die
+// Station bei Nicht-Grün jetzt { green: false, … } — ein geworfener Fehler
+// transportiert nur einen String und keine Diagnosefelder.
 const gateWaitPrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist die GATE-WAIT-Station für PR #${pr} (Issue #${n}). Sie läuft VOR dem Merge-Lock: Du wartest nur auf grüne Checks und fixst Findings — du mergst NIE, führst KEIN gh pr merge aus und machst KEINE Merge-Vorchecks (das übernimmt die Merge-Station danach).
-1. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit — danach Fehler werfen, dessen Text mit "GATE:" beginnt). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'}
-2. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget), danach Fehler werfen, dessen Text mit "GATE:" beginnt.
-Return { green: true } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün".`
+1. ZUERST den Draft-Zustand klären, BEVOR du irgendwo wartest: gh pr view ${pr} -R ${SLUG} --json isDraft,headRefOid. Ist isDraft true, liefert die Review-Pipeline per Design keinen grünen Pflicht-Check (ihr prep-Job ist auf draft == false gefiltert, alles Weitere hängt an prep) — darauf zu warten ist aussichtslos: gh pr ready ${pr} -R ${SLUG} ausführen und draftAtEntry: true melden (war er kein Draft: draftAtEntry: false). headRefOid ist der HEAD-SHA des PR; du brauchst ihn in Schritt 3.
+2. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'} SKIPPED oder NEUTRAL zählt hier NIE als grün — genau so wird der Pflicht-Check gemeldet, wenn der prep-Job übersprungen wurde (Draft, aber auch ein bloßes Label-Event am PR). Dann EINMAL den Re-Trigger aus Schritt 3 auslösen; meldet er danach erneut SKIPPED, nicht weiter warten, sondern { green: false } mit der note "Pflicht-Check meldet SKIPPED — Branch-Protection würde mergen, Runner nicht; Operator-Entscheidung".
+3. Meldet gh "no checks reported" oder ist statusCheckRollup leer, wartest du NICHT die vollen 45 Minuten ins Leere: Läufe des Branch holen — gh run list -R ${SLUG} --branch ${branch} --limit 20 --json databaseId,headSha,status,conclusion,workflowName — und davon NUR die mit headSha == <headRefOid aus Schritt 1> zählen; das ist runsFound (bei jedem weiteren Blick aktualisieren, im Return steht der letzte Stand). Ohne diesen Filter zählst du Läufe fremder Commits desselben Branch mit, und in jedem Repo mit mehreren Workflows wäre runsFound immer > 0. Ist runsFound nach rund 10 Minuten immer noch 0, GENAU EINEN Re-Trigger auslösen: gh pr ready ${pr} --undo -R ${SLUG} && gh pr ready ${pr} -R ${SLUG} (der Draft-Toggle feuert ready_for_review; die beiden Befehle gehören zusammen — der PR bleibt in JEDEM Ausgang dieser Station ready, du lässt ihn nie als Draft zurück), retriggered: true melden und weiterwarten. Dieser eine Re-Trigger gilt für die ganze Station, auch wenn ihn Schritt 2 (SKIPPED) auslöst. Kommt danach immer noch kein Lauf, liegt die Ursache außerhalb dieses PRs: KEIN zweiter Re-Trigger, kein leerer Commit, kein gh run rerun — beenden wie in Schritt 6. Ist runsFound > 0, erscheint am PR aber kein Check, ebenfalls NICHT re-triggern: das ist ein anderer Befund (Läufe da, Checks nicht am PR verknüpft) und gehört genau so in die note.
+5. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget).
+6. Return { green: true, draftAtEntry, runsFound, retriggered } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün". Wird es nicht grün (45 Minuten um, keine Checks trotz Re-Trigger, Pflicht-Check bleibt SKIPPED oder Runden aufgebraucht): KEINEN Fehler werfen, sondern { green: false, draftAtEntry, runsFound, retriggered, note } zurückgeben, note in EINEM Satz mit dem Grund. Die drei Diagnosefelder IMMER füllen, auch im grünen Fall — der Workflow baut daraus die Meldung, die der Operator im Issue-Kommentar liest.`
 
 // Post-Merge-Beweis (Issue #32): Bis 0.7.0 war jeder nicht-grüne CI-Lauf auf dem
 // Default-Branch "rot" — auch ein ABGEBROCHENER. Lauf wf_1121fbd9-e9e (2026-08-01,
@@ -452,7 +488,13 @@ const runUnit = async (u) => {
   // Gate-Stationen auf haiku (Token-Sparen, 2026-07-31): Warten, Merge-Kommandos
   // und gh-Verifikation sind mechanisch — die inhaltliche Prüfung ist längst gelaufen.
   const wait = await agent(gateWaitPrompt(n, pr, prBranch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
-  if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'}`)
+  // VOR dem Wurf bilden (Issue #34): der GATE:-String ist der einzige Draht zum
+  // Operator (Issue-Kommentar via needsHumanStop, done[].note im Lauf-Bericht) —
+  // ohne den Anhang bliebe die Diagnose im Agent-Return stecken. Wirft der Agent
+  // selbst, wird diese Zeile nie erreicht und die Meldung hat keinen
+  // Diagnose-Block; das ist der bewusst degradierte Pfad.
+  const gateDiag = gateDiagOf(wait)
+  if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'} ${gateDiagText(gateDiag)}`)
   const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
 
@@ -486,7 +528,9 @@ const runUnit = async (u) => {
   // kann sie nicht erzwingen (required würde die anderen zwei Zustände mitfangen),
   // deshalb hier ein Ersatztext statt eines stummen Eintrags im Bericht.
   const gateNote = gate.note || (pm === 'unmeasured' ? 'unmeasured ohne Begründung der Merge-Station' : '')
-  return { pr, fixRounds, postMerge: pm, note: gateNote }
+  // gateDiag auch im Erfolgsfall: ein Draft, den die Station stillschweigend
+  // geheilt hat, wäre sonst der häufigste Fall OHNE jede Spur im Bericht.
+  return { pr, fixRounds, gateDiag, postMerge: pm, note: gateNote }
 }
 
 let mergeChain = Promise.resolve()
@@ -573,8 +617,13 @@ const pickNext = () => {
 }
 
 // Inhaltlicher Gate-Fail: Einheit stoppt (needs-human), der LAUF fährt fort (Spec §6).
+// Der übergebene Grund geht WÖRTLICH in den Issue-Kommentar (Issue #34): er trägt
+// seit 0.8.0 die Diagnose der Gate-Station (Draft-Zustand, Lauf-Zahl, Re-Trigger),
+// und die alte Klammer "maxFixRounds erschöpft bzw. Gate nicht grün" lud den
+// Haiku-Agenten dazu ein, genau diese Felder zu einer der zwei Floskeln zu
+// paraphrasieren — der Operator startete dann wieder bei null.
 const needsHumanStop = async (u, reason) => {
-  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: kurzer Stand + Grund (maxFixRounds erschöpft bzw. Gate nicht grün). 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Offenen PR zum Issue (gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open) auf Draft setzen (gh pr ready <N> --undo -R ${SLUG}). 4. ${wtCleanup(u.n)} Lokale Feature-Branches dieses Issues OHNE offenen PR mit git branch -D löschen.`,
+  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: den oben übergebenen Grund WÖRTLICH übernehmen (vollständig, inklusive Klammerzusätze — nicht zusammenfassen, nicht umformulieren), danach EIN Satz Stand. 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Offenen PR zum Issue (gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open) auf Draft setzen (gh pr ready <N> --undo -R ${SLUG}). 4. ${wtCleanup(u.n)} Lokale Feature-Branches dieses Issues OHNE offenen PR mit git branch -D löschen.`,
     { label: `needs-human #${u.n}`, phase: 'Implement', model: 'haiku' })
 }
 

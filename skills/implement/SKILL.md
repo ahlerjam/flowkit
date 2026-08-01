@@ -174,10 +174,24 @@ statt still ewig zu blockieren.
    Verdict, und jede Regression (met → unmet) wird explizit ausgewiesen.
 5. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
    frischer Agent VOR dem Merge (Injection, AuthZ, Secrets, Test-Gaming-Querblick).
-6. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
-   bei FAILURE P0/P1 adressieren (Restbudget aus maxFixRounds) — parallele
-   Einheiten warten so nicht auf fremde CI, der Lock serialisiert nur noch das
-   Mergen.
+6. **Gate-Wait** (OHNE Merge-Lock): zuerst den Draft-Zustand klären (`gh pr view
+   --json isDraft,headRefOid`; Draft → `gh pr ready`, denn der prep-Job der
+   Review-Pipeline ist auf `draft == false` gefiltert und der Pflicht-Check hängt
+   an prep — an einem Draft wird er nie SUCCESS, sondern SKIPPED). Dann
+   CONFIG.mergeCheck abwarten (45-Minuten-Cap); SKIPPED und NEUTRAL zählen nicht
+   als grün (bewusste Verschärfung gegenüber der Branch-Protection, für die ein
+   übersprungener Job den Required Check erfüllt). Meldet gh „no checks
+   reported", zählt die Station die Workflow-Läufe auf dem **HEAD-SHA des PR**
+   (`gh run list --branch`, gefiltert auf `headSha` — ungefiltert wäre die Zahl
+   in jedem Multi-Workflow-Repo immer > 0) und löst GENAU EINEN Re-Trigger aus
+   (Draft-Toggle); danach wird nicht weiter getriggert, und der PR bleibt in
+   jedem Ausgang `ready`. Bei FAILURE P0/P1 adressieren (Restbudget aus
+   maxFixRounds) — parallele Einheiten warten so nicht auf fremde CI, der Lock
+   serialisiert nur noch das Mergen. Wird es nicht grün, meldet die Station
+   `{ green: false, draftAtEntry, runsFound, retriggered, note }` statt zu
+   werfen; der Workflow hängt diese Diagnose an die `GATE:`-Meldung und führt sie
+   als `done[].gateDiag` mit — auch im grünen Fall, sonst hinterlässt ein still
+   geheilter Draft keine Spur. Nur ein geworfener Fehler kommt ohne Diagnose an.
 7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
