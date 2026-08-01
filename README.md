@@ -35,14 +35,16 @@ directly — the install arrives as a pull request.
 | Idea → issue | `/flowkit:issue impuls "<one sentence>"` | Full spec issue (What/Why/Scope/AC + labels); low-risk issues become `agent-ready` automatically |
 | AI finds work | `/flowkit:issue gaps <area> [max N]` | Spec issues labeled `needs-triage` — flipping the label to `agent-ready` is your only mandatory touchpoint |
 | Work it off | `/flowkit:implement next N \| issues A,B \| epic N \| milestone "X" [max X]` | Autonomous run: Planner → Builder (TDD, isolated worktree) → PR check against GitHub → fresh AC verifier → PR deep review → auto squash-merge → post-merge smoke |
-| Pick up stranded work | `/flowkit:implement resume [all]` | Re-opens `budget-exceeded` (with `all`: also `needs-human`) issues that have an open PR — the builder continues the existing branch instead of starting over; human commits on the branch are treated as ground truth |
+| Pick up stranded work | `/flowkit:implement resume [all]` | Re-opens `budget-exceeded` (with `all`: also `needs-human`) issues that have an open PR — the builder continues the existing branch, clears any stale abort label on the PR, instead of starting over; human commits on the branch are treated as ground truth |
 | Lagebild | `/flowkit:status` | Read-only dashboard: label queues, stranded work, recent runs, budget calibration, template drift |
 | Nachtlauf einrichten | `/flowkit:nightly` | Guardrail-gated setup of an unattended nightly `implement` run |
 
 ## Guardrails
 
 - **Hard turn budget per issue** (by `size/S|M|L` label): overruns abort cleanly
-  with a `budget-exceeded` label and a draft PR instead of burning tokens.
+  with a `budget-exceeded` label on the issue and its PR plus an explicit abort
+  comment on the PR instead of burning tokens — the PR stays ready so the review
+  pipeline still runs.
 - **Issue-global fix-round state machine** (`maxFixRounds`): exactly one model
   escalation, then `needs-human` — the run moves on, never loops.
 - **Infrastructure is retried, not debugged:** when a CI job dies before the

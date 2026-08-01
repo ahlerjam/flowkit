@@ -25,6 +25,18 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   `postMerge: "green" | "red" | "unmeasured"`, and run reports carry
   `done[].postMerge` instead of `done[].postMergeRed`. Operators who parse
   `.flowkit/runs/*.json` need to adapt. (#32)
+- The `needs-human` and budget-abort paths no longer set the PR back to draft.
+  The "do not merge" signal now travels as a label on the PR (`needs-human` /
+  `budget-exceeded`) plus an explicit, idempotent abort comment (first line
+  `<!-- flowkit-abort:v1 -->` — a repeated abort with the same reason does not
+  post twice). The PR stays ready, so the deep-review pipeline — which skips
+  drafts by design, taking its verdict with it — still produces the findings
+  the human taking over needs. The builder strips those labels when it takes
+  an existing PR over, and the merge station refuses to merge a PR that still
+  carries one (`gh pr view --json labels`); this is a prompt-level guard on the
+  cheapest model in the pipeline, not the hard server-side block the draft
+  state used to be. PRs an earlier flowkit version left as draft are healed on
+  `resume`; without it, a manual `gh pr ready <N>` is still required. (#35)
 
 ### Fixed
 - Post-merge proof no longer treats a cancelled CI run as a failure (#32). The

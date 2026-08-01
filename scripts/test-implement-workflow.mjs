@@ -6,7 +6,9 @@
 // needs-human, Stop nach doppeltem technischem Fehler,
 // PR-Check-Station gegen den Weltzustand, Fortschritts-Circuit-Breaker,
 // CI-Infrastruktur-Re-Run im Gate-Wait (Diagnose vor Fix-Runde),
-// Allowlist-taugliche Quotierung der Plugin-Script-Pfade) mit
+// Allowlist-taugliche Quotierung der Plugin-Script-Pfade,
+// Abbruchpfade ohne Draft (Label + Abbruchkommentar am PR statt
+// gh pr ready --undo) und der Merge-Guard gegen Abbruch-Labels) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
 // Harness: die Engine stellt dem Workflow-Script Globals bereit (args, log,
@@ -1066,6 +1068,79 @@ test('Allowlist-Kohärenz: gh run rerun und tail sind im settings-Template erlau
   // gh-Kommando davor.
   assert.ok(/\| tail -n/.test(p), 'der Logauszug läuft über eine tail-Pipe')
   assert.ok(/"Bash\(tail\*?\)"/.test(tpl), 'settings.json.template erlaubt kein tail')
+})
+
+// ---------------------------------------------------------------------------
+// Abbruchpfade ohne Draft, Merge-Guard (Issue #35)
+// ---------------------------------------------------------------------------
+
+// 36. Der frühere Draft-Zustand nahm dem PR die Deep-Review-Pipeline (ihr
+//     prep-Job ist auf draft == false gefiltert) — genau das Urteil, das der
+//     Mensch beim Übernehmen braucht. Das Signal "nicht mergen" wandert deshalb
+//     auf ein Label plus einen Abbruchkommentar, der PR bleibt ready.
+test('needs-human: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const p = only(calls, 'needs-human #1').prompt
+  assert.ok(/gh pr edit <N> -R acme\/demo --add-label needs-human/.test(p), 'Label am PR fehlt')
+  assert.ok(/gh pr comment <N> -R acme\/demo/.test(p), 'Abbruchkommentar am PR fehlt')
+  assert.ok(/<!-- flowkit-abort:v1 -->/.test(p), 'Abbruch-Marker fehlt')
+  assert.ok(/Body exakt "Closes #1" enthält/.test(p),
+    'hier wird an einen gefundenen PR geschrieben (Label + Kommentar) — die Treffer-Verifikation gegen den Body ist nicht optional')
+  // Regressionsnetz gegen ein Wiedereinführen des Draft-Setzens an dieser
+  // Station — bewusst NUR auf diesen einen Prompt eingegrenzt: Issue #34 hat im
+  // Gate-Wait-Re-Trigger ein legitimes `gh pr ready ... --undo` eingeführt, eine
+  // laufweite Prüfung wäre dort falsch-positiv.
+  assert.ok(!/--undo/.test(p), 'der needs-human-Prompt darf den PR nicht mehr per --undo auf Draft setzen')
+})
+
+// 37. Gegenstück für den Budget-Pfad. (e) ist zugleich der TDZ-Guard: budgetStop
+//     läuft auch VOR dem Build (Zeile ~435, "nach Planner") — `const pr` liegt
+//     dort in der Temporal Dead Zone, die PR-Nummer muss also aus dem
+//     gh-Aufruf im Prompt kommen, nie interpoliert werden.
+test('Budget-Abbruch: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', async () => {
+  const state = { tokens: 0 }
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } } }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => { if (c.label === 'build #1') state.tokens += 5000 },
+  })
+  const p = only(calls, 'budget-abort #1').prompt
+  assert.ok(/gh pr edit <N> -R acme\/demo --add-label budget-exceeded/.test(p), 'Label am PR fehlt')
+  assert.ok(/gh pr comment <N> -R acme\/demo/.test(p), 'Abbruchkommentar am PR fehlt')
+  assert.ok(/<!-- flowkit-abort:v1 -->/.test(p), 'Abbruch-Marker fehlt')
+  assert.ok(!/--undo/.test(p), 'der Budget-Abbruch darf den PR nicht mehr per --undo auf Draft setzen')
+  assert.ok(/gh pr list -R acme\/demo --search "Closes #1" --state open/.test(p),
+    'die PR-Nummer muss weiterhin über gh gesucht werden, nicht aus ${pr} interpoliert')
+  assert.ok(/Body exakt "Closes #1" enthält/.test(p),
+    'hier wird an einen gefundenen PR geschrieben (Label + Kommentar) — die Treffer-Verifikation gegen den Body ist nicht optional')
+})
+
+// 38. Bisher löschte `gh pr ready` beim Übernehmen das Abbruch-Signal implizit
+//     mit. Wandert es auf ein Label, muss der Builder es jetzt selbst entfernen
+//     — sonst trägt ein per resume fortgeführter, gemergter PR das Label ewig.
+test('Builder-Idempotenz: übernommener PR verliert die Abbruch-Labels', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const p = only(calls, 'build #1').prompt
+  assert.ok(/gh pr edit <NUMMER> -R acme\/demo --remove-label needs-human --remove-label budget-exceeded/.test(p),
+    'der Idempotenz-Schritt muss die Abbruch-Labels beim Übernehmen entfernen')
+  assert.ok(/ist der PR Draft: gh pr ready <NUMMER> -R acme\/demo/.test(p),
+    'das ready-Setzen übernommener Drafts (frühere flowkit-Versionen, Menschen) darf nicht mit entfernt werden')
+})
+
+// 39. Der Draft-Zustand war ein HARTES Merge-Hindernis (gh pr merge verweigert
+//     Drafts), ein Label ist es nicht — ohne diesen Guard würde ein PR, dessen
+//     Abbruch-Label beim Übernehmen nicht entfernt wurde, stumm durchgemergt.
+test('Merge-Station: Abbruch-Labels am PR blocken den Merge', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const p = only(calls, 'gate-merge #1').prompt
+  assert.ok(/kein needs-human- und kein budget-exceeded-Label auf dem PR/.test(p), 'Merge-Guard fehlt')
+  assert.ok(/gh pr view 101 -R acme\/demo --json labels/.test(p), 'die Prüfung muss den Live-Zustand des PR lesen, nicht Prosa glauben')
+  assert.ok(/Abbruch-Signal[\s\S]{0,200}GATE:/.test(p), 'ein gefundenes Abbruch-Label muss zum GATE-Fehler führen, nicht zum Merge')
 })
 
 // ---------------------------------------------------------------------------

@@ -116,7 +116,8 @@ Dazu ehrlich dazusagen, statt es zu verschweigen:
 Diesen Abschnitt in den Bericht übernehmen — er ist die Begründung, warum hier
 niemand wach bleiben muss:
 - **Hartes Budget je Issue** (`budgets` nach `size/S|M|L`): Überschreitung bricht
-  die Einheit sauber ab — Kommentar, Label `budget-exceeded`, PR als Draft,
+  die Einheit sauber ab — Kommentar, Label `budget-exceeded` an Issue und PR,
+  Abbruchkommentar am PR (der PR bleibt ready, damit die Review-Pipeline läuft),
   Worktree-Cleanup — statt die Nacht durchzubrennen. Der Lauf macht weiter.
 - **Issue-globale Fix-Runden** (`maxFixRounds`) mit genau EINER Modell-Eskalation,
   danach `needs-human`: keine Endlosschleife, der Lauf geht zum nächsten Issue.
@@ -163,10 +164,14 @@ Mensch den Scope gelesen hat. Die Qualität der Nacht ist die Qualität der Queu
 
 Erster Griff: `/flowkit:status`. In dieser Reihenfolge lesen:
 1. **needs-human** — hier wartet eine Entscheidung; der Grund steht im letzten
-   Issue-Kommentar bzw. im Draft-PR.
+   Issue-Kommentar und im Abbruchkommentar am PR (erste Zeile
+   `<!-- flowkit-abort:v1 -->`); der PR ist nicht mehr Draft, sein
+   Review-Urteil steht also zur Verfügung.
 2. **Gestrandete Arbeit** — `budget-exceeded` mit offenem PR wird mit
    `/flowkit:implement resume` fortgesetzt (Budget zählt frisch), `needs-human`
-   nur bewusst mit `resume all`.
+   nur bewusst mit `resume all`. Stammt der PR aus einem Lauf vor 0.8.0 und ist
+   noch Draft: `resume` setzt ihn automatisch wieder ready; ohne Resume hilft
+   nur ein manuelles `gh pr ready <N>`.
 3. **Letzte Läufe** — erledigt/needs-human/blocked und der Stop-Grund des
    Nachtlaufs.
 4. **Budget-Kalibrierung** — nach einigen Delta-Läufen die Vorschläge für

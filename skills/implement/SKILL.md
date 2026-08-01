@@ -80,9 +80,11 @@ einzelnen Einheit zurechenbar ist.
   Volltextsuche kann auch `#<N>XX` liefern). Je Treffer VOR dem Lauf:
   `gh issue edit <N> -R "$REPO_SLUG" --remove-label budget-exceeded
   --remove-label needs-human --add-label agent-ready`. Der Builder übernimmt den
-  bestehenden PR über seinen Idempotenz-Schritt (Branch weiterführen, Draft
-  wieder ready setzen) — Code und bereits gefundene Fehler werden nicht ein
-  zweites Mal erarbeitet. Das Budget zählt im Resume-Lauf frisch. Ohne `all`
+  bestehenden PR über seinen Idempotenz-Schritt (Branch weiterführen, einen
+  Draft früherer Versionen wieder ready setzen, die Abbruch-Labels
+  `needs-human`/`budget-exceeded` vom PR entfernen) — Code und bereits gefundene
+  Fehler werden nicht ein zweites Mal erarbeitet. Das Budget zählt im
+  Resume-Lauf frisch. Ohne `all`
   bleiben `needs-human`-Issues bewusst liegen: dieses Label heißt, ein Mensch
   muss erst den gemeldeten Blocker (letzter Issue-Kommentar) entscheiden;
   `resume all` ist die explizite Operator-Zustimmung, es trotzdem erneut zu
@@ -206,7 +208,10 @@ statt still ewig zu blockieren.
    `GATE:`-Meldung und führt sie als `done[].gateDiag` mit — auch im grünen Fall,
    sonst hinterlässt ein still geheilter Draft keine Spur. Nur ein geworfener
    Fehler kommt ohne Diagnose an.
-7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
+7. **Merge** (IM Merge-Lock, serialisiert): Override-Label-, Abbruch-Label-
+   (`needs-human`/`budget-exceeded` am PR — Prompt-Guard gegen ein liegen
+   gebliebenes Signal eines früheren Laufs, kein serverseitiges Hindernis wie
+   der frühere Draft-Zustand) und malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
    (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
@@ -248,10 +253,13 @@ statt still ewig zu blockieren.
 - **Inhaltlicher Gate-Fail** (AC-Verifier/Security/Gate-Wait nach
   erschöpftem maxFixRounds nicht grün, oder die Merge-Station findet im Lock
   rote Checks bzw. einen semantischen Konflikt vor — im Lock wird nicht
-  gefixt): die EINHEIT stoppt — Label `needs-human`,
-  PR bleibt als Draft mit Kommentar; der LAUF fährt mit dem nächsten Issue fort.
-  Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2 laufen Fixes genau
-  eine Modellstufe höher (CONFIG.models.escalation).
+  gefixt): die EINHEIT stoppt — Label `needs-human`, dazu am zugehörigen
+  offenen PR dasselbe Label plus einen Abbruchkommentar (erste Zeile
+  `<!-- flowkit-abort:v1 -->`). Der PR bleibt bewusst READY und wird NICHT auf
+  Draft gesetzt: die Deep-Review-Pipeline überspringt Drafts, und genau ihr
+  Urteil braucht der Mensch, der übernimmt (#35). Der LAUF fährt mit dem
+  nächsten Issue fort. Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2
+  laufen Fixes genau eine Modellstufe höher (CONFIG.models.escalation).
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall, ODER: nach dem Builder ist
   auf GitHub kein verwertbarer PR zum Issue nachweisbar — siehe Station 3):
   erster Fehler → Cleanup + Queue-Ende (transient); zweiter technischer Fehler
@@ -276,8 +284,9 @@ statt still ewig zu blockieren.
   ohne Beleg wäre der teurere Fehler. Er steht im Bericht und im Log.
 - **Budget-Überschreitung je Issue** (nur bei `parallelism: 1` — nur dort ist das
   Delta von `budget.spent()` einer Einheit zurechenbar) → Einheit sauber
-  abgebrochen (Kommentar, Label `budget-exceeded`, PR auf Draft,
-  Worktree-Cleanup), zählt NICHT als Fehler, Lauf geht weiter.
+  abgebrochen (Issue-Kommentar, Label `budget-exceeded` am Issue UND am offenen
+  PR, Abbruchkommentar am PR, Worktree-Cleanup; der PR bleibt ready, siehe
+  oben), zählt NICHT als Fehler, Lauf geht weiter.
 - **Lauf-Gesamtdeckel** (bei `parallelism > 1`, `tokenMode: "run"`): Deckel =
   Summe der Einheiten-Budgets dieses Laufs × `CONFIG.runBudgetFactor` (Default
   1.2). Ist er überschritten, wird KEINE neue Einheit mehr gestartet; laufende

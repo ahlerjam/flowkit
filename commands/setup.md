@@ -55,6 +55,10 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
    Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
+   `needs-human` und `budget-exceeded` setzt der Runner seit 0.8.0 zusätzlich am
+   zugehörigen PR — das ist dort das Signal „nicht mergen" und ersetzt das frühere
+   Draft-Setzen. Repo-Labels gelten für Issues und PRs gleichermaßen; ein zweites
+   Label ist NICHT anzulegen.
 4. **Board (optional, Stufe-1-Delta §13):** Labels sind in Stufe 1 die einzige
    Pflicht-Übersicht. Auf Operator-Wunsch: `gh project create --owner <owner>
    --title "flowkit — <repo>"` anlegen und dem Operator sagen, dass die
