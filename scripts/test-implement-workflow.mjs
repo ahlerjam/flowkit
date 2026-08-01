@@ -5,6 +5,7 @@
 // Learnings-Station, Post-Merge-Dreiwertigkeit (green/red/unmeasured),
 // needs-human, Stop nach doppeltem technischem Fehler,
 // PR-Check-Station gegen den Weltzustand, Fortschritts-Circuit-Breaker,
+// CI-Infrastruktur-Re-Run im Gate-Wait (Diagnose vor Fix-Runde),
 // Allowlist-taugliche Quotierung der Plugin-Script-Pfade) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
@@ -463,11 +464,11 @@ test('Gate-Wait grün: gateDiag steht auch im Erfolgsfall im Bericht', async () 
       ? { green: true, draftAtEntry: true, runsFound: 2, retriggered: false }
       : undefined),
   })
-  assert.deepEqual(doneOf(report, 1).gateDiag, { draftAtEntry: true, runsFound: 2, retriggered: false })
+  assert.deepEqual(doneOf(report, 1).gateDiag, { draftAtEntry: true, runsFound: 2, retriggered: false, infraRerun: null })
   // Gegenprobe: fehlende Felder werden null (auswertbar), nicht undefined (fällt
   // beim Serialisieren des Berichts ersatzlos weg).
   const plain = await runWorkflow({ units: [unit(1)], config: cfg() })
-  assert.deepEqual(doneOf(plain.report, 1).gateDiag, { draftAtEntry: null, runsFound: null, retriggered: null })
+  assert.deepEqual(doneOf(plain.report, 1).gateDiag, { draftAtEntry: null, runsFound: null, retriggered: null, infraRerun: null })
 })
 
 // 9. Technischer Doppel-Fehler stoppt den Lauf: build wirft zweimal ohne
@@ -939,6 +940,132 @@ test('GATE_SCHEMA: dreiwertiges postMerge statt boolean postMergeGreen', async (
   // Engine-Toleranz dafür ist unverifiziert.
   assert.equal(s.properties.postMerge.type, 'string')
   assert.equal(s.additionalProperties, false, 'der Agent darf den Zustand nicht an der Enum vorbei melden')
+})
+
+// 28. Kern von Issue #36: die Diagnose steht VOR der Fix-Runde. Hinge der
+//     Re-Run hinter dem Fix-Teil, wäre er wirkungslos — die Fix-Runde ist dann
+//     schon verbrannt. Der mergeCheck-Qualifier gehört mit in Schritt 4, sonst
+//     löst auch ein rein informativer Check die Diagnose (und den Re-Run) aus.
+test('Gate-Wait: Infra-Diagnose und Re-Run stehen vor der Fix-Runde', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg({ mergeCheck: 'coordinator' }) })
+  const p = only(calls, 'gate-wait #1').prompt
+  assert.ok(/gh run rerun <RUN_ID> --failed -R acme\/demo/.test(p), 'ohne den Re-Run bleibt nur die Fix-Runde')
+  assert.ok(/--log-failed \| tail -n 300/.test(p), 'ohne Logauszug ist die Klassifikation Raten')
+  for (const s of ['operation timed out', 'Failed to download', 'error sending request for url', 'Could not resolve host', 'The runner has received a shutdown signal']) {
+    assert.ok(p.includes(s), `Standard-Signatur fehlt im Prompt: ${s}`)
+  }
+  assert.ok(p.indexOf('gh run rerun') < p.indexOf('Review-Sticky-Comment'),
+    'Diagnose muss VOR der Fix-Runde stehen — dahinter ist die Runde schon verbraucht')
+  assert.ok(p.includes('EIN Re-Run JE ROTEM LAUF und HÖCHSTENS ZWEI'),
+    '--failed wirkt pro Lauf; ohne den Deckel wiederholt die Station einen reproduzierbaren Setup-Fehler endlos')
+  assert.ok(/Bei FAILURE des Checks "coordinator" ZUERST diagnostizieren/.test(p),
+    'ohne Qualifier löst jeder informative Check Diagnose und Re-Run aus')
+})
+
+// 29. Schema-Kopplung: der Prompt darf infraRerun nur verlangen, wenn das Schema
+//     es auch durchlässt — additionalProperties: false verwürfe es sonst still,
+//     und die Station fiele bei jeder Antwort mit dem Feld technisch aus.
+test('Gate-Wait: WAIT_SCHEMA erlaubt infraRerun, ohne es zu erzwingen', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const s = only(calls, 'gate-wait #1').opts.schema
+  assert.equal(s.properties.infraRerun.type, 'boolean')
+  assert.deepEqual(s.required, ['green'], 'infraRerun bleibt optional — ohne Re-Run antwortet die Station weiter gültig')
+  assert.equal(s.additionalProperties, false, 'genau deshalb muss das Feld deklariert sein')
+})
+
+// 30. Der Re-Run muss im Bericht und im Protokoll ankommen, ohne eine Fix-Runde
+//     zu kosten — sonst hätte die Ausnahme vom maxFixRounds-Automaten keine Spur.
+test('Gate-Wait: infraRerun landet in gateDiag und im LOG, ohne eine Fix-Runde zu verbrauchen', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-wait /.test(c.label) ? { green: true, infraRerun: true } : undefined),
+  })
+  assert.equal(doneOf(report, 1).gateDiag.infraRerun, true)
+  assert.equal(doneOf(report, 1).fixRounds, 0, 'ein Infra-Re-Run darf keine Fix-Runde kosten')
+  assert.ok(logs.some((l) => /CI-Infrastruktur-Re-Run/.test(l)), 'LOG zum Re-Run fehlt')
+  assert.ok(!logs.some((l) => /Infrastruktur-Re-Run.*von \d+ verbraucht/.test(l)),
+    'die Station meldet keine Runden zurück — eine Runden-Buchführung im LOG wäre erfunden')
+  none(calls, /^fix\d+ #1/)
+  assert.equal(report.stopped, null)
+})
+
+// 31. Der Schadensfall, für den das Feld gebaut wurde: Re-Run passiert, die
+//     Checks bleiben trotzdem rot. Genau hier ging die Information in der
+//     ursprünglichen Fassung verloren (Auswertung erst NACH dem Wurf) — der
+//     Operator sähe die flakige CI dann nur im Erfolgsfall.
+test('Gate-Wait: infraRerun überlebt den GATE-Pfad bis in den needs-human-Kommentar', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-wait /.test(c.label)
+      ? { green: false, draftAtEntry: false, runsFound: 3, retriggered: false, infraRerun: true, note: 'nach dem Re-Run erneut rot' }
+      : undefined),
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(/CI-Infrastruktur-Re-Run: ausgeführt/.test(d1.note), 'der Re-Run fehlt in der GATE-Meldung')
+  assert.ok(/CI-Infrastruktur-Re-Run: ausgeführt/.test(only(calls, 'needs-human #1').prompt),
+    'der Operator liest den Issue-Kommentar, nicht den JSON-Bericht')
+  assert.ok(logs.some((l) => /CI-Infrastruktur-Re-Run/.test(l)), 'auch im Schadensfall gehört der Re-Run ins Protokoll')
+})
+
+// 32. Die Operator-Zusage "der Re-Run zählt nicht auf maxFixRounds" ist erst dann
+//     etwas wert, wenn sie bei ERSCHÖPFTEM Fix-Budget noch gilt: genau dort ging
+//     die Einheit bisher wegen eines Paketdownloads auf needs-human.
+test('Gate-Wait: Infra-Re-Run bleibt bei erschöpftem Fix-Budget erlaubt (rounds = 0)', async () => {
+  let acCalls = 0
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 1 }),
+    respond: (c) => (/^ac-verify/.test(c.label) ? (acCalls++ === 0 ? { pass: false, unmet: ['AC offen'] } : { pass: true, unmet: [] }) : undefined),
+  })
+  assert.equal(doneOf(report, 1).fixRounds, 1, 'Aufbau gepinnt: genau eine Fix-Runde verbraucht')
+  const p = only(calls, 'gate-wait #1').prompt
+  assert.ok(p.includes('Maximal 0 Runde(n)'), 'Aufbau gepinnt: das Fix-Budget ist erschöpft')
+  assert.ok(/gh run rerun/.test(p), 'der Infra-Re-Run muss auch ohne Fix-Runden verfügbar bleiben')
+  assert.ok(p.includes('auch bei 0 verbleibenden Fix-Runden erlaubt'))
+})
+
+// 33. ciInfraSignatures ERGÄNZT die eingebauten Signaturen. Die zweite Assertion
+//     ist der Wächter gegen `INFRA_SIG = C.ciInfraSignatures || DEFAULT`, das
+//     eine gesetzte Config die Standards still abschalten ließe.
+test('ciInfraSignatures: eigene Signaturen ergänzen die Standards, statt sie zu ersetzen', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ ciInfraSignatures: ['self-hosted runner lost communication'] }),
+  })
+  const p = only(calls, 'gate-wait #1').prompt
+  assert.ok(p.includes('self-hosted runner lost communication'), 'eigene Signatur fehlt im Prompt')
+  assert.ok(p.includes('Could not resolve host'), 'eigene Signaturen dürfen die Standards nicht ersetzen')
+})
+
+// 34. Fehlkonfiguration kehrt die Schutzwirkung um: ein Leerstring ist Teilstring
+//     JEDES Logs und würde jeden roten Check als Infrastruktur werten — die
+//     inhaltliche Prüfung des Gates wäre ausgehebelt. Muss laut abbrechen.
+test('ciInfraSignatures: unbrauchbarer Wert bricht ab statt still zu wirken', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ ciInfraSignatures: 'operation timed out' }) }),
+    /ciInfraSignatures muss ein Array nicht-leerer Strings sein/,
+  )
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ ciInfraSignatures: ['ok', '  '] }) }),
+    /ciInfraSignatures muss ein Array nicht-leerer Strings sein/,
+  )
+})
+
+// 35. Prompt und Allowlist werden getrennt gepflegt; ihr Auseinanderlaufen
+//     erzeugt den Fehlermodus, den kein anderer Test sieht: ein Fix, der im
+//     beaufsichtigten Test funktioniert und nachts am Permission-Prompt steht.
+test('Allowlist-Kohärenz: gh run rerun und tail sind im settings-Template erlaubt', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  const p = only((await runWorkflow({ units: [unit(1)], config: cfg() })).calls, 'gate-wait #1').prompt
+  assert.ok(/gh run rerun/.test(p), 'Gate-Wait ruft kein gh run rerun auf')
+  assert.ok(/"Bash\(gh run rerun\*?\)"/.test(tpl), 'settings.json.template erlaubt kein gh run rerun')
+  // Die Permission-Prüfung zerlegt Pipelines: `| tail` prompted genauso wie das
+  // gh-Kommando davor.
+  assert.ok(/\| tail -n/.test(p), 'der Logauszug läuft über eine tail-Pipe')
+  assert.ok(/"Bash\(tail\*?\)"/.test(tpl), 'settings.json.template erlaubt kein tail')
 })
 
 // ---------------------------------------------------------------------------

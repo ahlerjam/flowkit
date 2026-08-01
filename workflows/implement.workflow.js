@@ -80,6 +80,24 @@ const orphanProt = PROT.filter((p) => !(C.areas || []).includes(p))
 if (orphanProt.length) {
   throw new Error(`flowkit: protectedAreas ${JSON.stringify(orphanProt)} fehlen in areas — als area/*-Label nie vergebbar, der Schutz wäre strukturell wirkungslos. areas in workflow.config.json ergänzen.`)
 }
+// CI-Infrastruktur statt Code (Issue #36): scheitert ein Job VOR dem eigentlichen
+// Test-/Lint-/Review-Aufruf (Checkout, Setup-Action, Paketdownload,
+// Runner-Provisionierung), ist das keine Aussage über den Code. Eine Fix-Runde
+// kostet dort einen kompletten Agenten-Durchlauf für eine Ursache, die es nicht
+// gibt (ab Runde 2 auch noch eine Modellstufe höher). Ein Re-Run ist billiger,
+// aber NICHT gratis: ist der rote Lauf die Review-Pipeline selbst (Default
+// mergeCheck "coordinator"), verbraucht er erneut deren Modell-Kontingent.
+// Deshalb gedeckelt statt frei — ein Re-Run je rotem Lauf, höchstens zwei in der
+// Station; ein reproduzierbarer Setup-Fehler (kaputter Dependency-Pin) muss
+// inhaltlich behandelt und nicht endlos wiederholt werden.
+const INFRA_SIG_DEFAULT = ['operation timed out', 'Failed to download', 'error sending request for url', 'Could not resolve host', 'The runner has received a shutdown signal']
+if (C.ciInfraSignatures !== undefined && (!Array.isArray(C.ciInfraSignatures) || C.ciInfraSignatures.some((s) => typeof s !== 'string' || !s.trim()))) {
+  throw new Error(`flowkit: ciInfraSignatures muss ein Array nicht-leerer Strings sein (ist ${JSON.stringify(C.ciInfraSignatures)}) — ein Leerstring wäre Teilstring JEDES Logs und würde jeden roten Check als Infrastruktur werten (die inhaltliche Prüfung des Gates wäre damit ausgehebelt); ein falscher Typ würde still ignoriert.`)
+}
+// concat statt Ersetzen: eine gesetzte Config darf die eingebauten Signaturen
+// nicht abschalten — sie ergänzt repo-eigene Infrastruktur (selbstgehostete
+// Runner, interne Registry).
+const INFRA_SIG = Array.from(new Set(INFRA_SIG_DEFAULT.concat(C.ciInfraSignatures || [])))
 const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: 'opus' }
 // Token-Attribution: budget.spent() ist ein GLOBALER Zähler. Sein Delta ist nur bei
 // parallelism 1 einer Einheit zurechenbar — bei >1 enthielte es den Verbrauch aller
@@ -199,8 +217,11 @@ const VERIFY_SCHEMA = {
   },
 }
 // additionalProperties: false verwirft jedes Feld, das hier nicht steht — ohne die
-// drei Diagnosefelder (Issue #34) KANN die Station Draft-Zustand und Lauf-Zahl gar
-// nicht melden, egal wie gut der Prompt ist. required bleibt ['green']: eine
+// Diagnosefelder (Issue #34, #36) KANN die Station Draft-Zustand, Lauf-Zahl und
+// Infra-Re-Run gar nicht melden, egal wie gut der Prompt ist. Prompt- und
+// Schema-Änderung gehören deshalb immer in denselben Commit: nur den Prompt zu
+// erweitern hieße, dass jede Antwort mit dem neuen Feld an der Validierung
+// scheitert und die Station technisch ausfällt. required bleibt ['green']: eine
 // Antwort ohne Diagnose (abgewürgter Agent) bleibt gültig und schlägt nicht als
 // technischer Fehler durch — sie rendert dann als "unbekannt".
 const WAIT_SCHEMA = {
@@ -210,6 +231,7 @@ const WAIT_SCHEMA = {
     draftAtEntry: { type: 'boolean', description: 'war der PR beim Eintritt in die Station ein Draft (dann liefert die Review-Pipeline per Design keinen grünen Pflicht-Check) — die Station hat ihn in dem Fall auf ready gesetzt' },
     runsFound: { type: 'integer', minimum: 0, description: 'Zahl der Workflow-Läufe auf dem PR-HEAD-SHA beim letzten Blick (gh run list --branch, gefiltert auf headSha)' },
     retriggered: { type: 'boolean', description: 'true, wenn die Station den einen erlaubten Re-Trigger (Draft-Toggle) ausgeführt hat' },
+    infraRerun: { type: 'boolean', description: 'true, wenn wegen einer CI-Infrastruktur-Ursache mindestens ein gh run rerun --failed nötig war (zählt NICHT auf maxFixRounds)' },
     note: { type: 'string' },
   },
 }
@@ -224,8 +246,13 @@ const gateDiagOf = (w) => ({
   draftAtEntry: w && typeof w.draftAtEntry === 'boolean' ? w.draftAtEntry : null,
   runsFound: w && Number.isInteger(w.runsFound) ? w.runsFound : null,
   retriggered: w && typeof w.retriggered === 'boolean' ? w.retriggered : null,
+  // Issue #36 fährt im selben Objekt mit statt in einem eigenen Return-Feld: der
+  // Infra-Re-Run muss GENAU DORT ankommen, wo die Einheit scheitert (GATE:-Wurf →
+  // needs-human-Kommentar), sonst sieht der Operator die flakige CI nur im
+  // Erfolgsfall und nie im Schadensfall.
+  infraRerun: w && typeof w.infraRerun === 'boolean' ? w.infraRerun : null,
 })
-const gateDiagText = (d) => `(Draft beim Eintritt: ${d.draftAtEntry === null ? 'unbekannt' : d.draftAtEntry ? 'ja' : 'nein'}; Workflow-Läufe auf dem Branch: ${d.runsFound === null ? 'unbekannt' : d.runsFound}; Re-Trigger: ${d.retriggered === null ? 'unbekannt' : d.retriggered ? 'ausgeführt' : 'nein'})`
+const gateDiagText = (d) => `(Draft beim Eintritt: ${d.draftAtEntry === null ? 'unbekannt' : d.draftAtEntry ? 'ja' : 'nein'}; Workflow-Läufe auf dem Branch: ${d.runsFound === null ? 'unbekannt' : d.runsFound}; Re-Trigger: ${d.retriggered === null ? 'unbekannt' : d.retriggered ? 'ausgeführt' : 'nein'}; CI-Infrastruktur-Re-Run: ${d.infraRerun === null ? 'unbekannt' : d.infraRerun ? 'ausgeführt' : 'nein'})`
 // Dreiwertig statt boolean (Issue #32): ein abgebrochener oder übersprungener
 // Post-Merge-Lauf ist KEINE Rotmeldung, sondern eine fehlende Messung. Nur
 // failure/timed_out auf dem eigenen Merge-Commit (bzw. ein roter Smoke) sind ein
@@ -336,9 +363,11 @@ const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter
 const gateWaitPrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist die GATE-WAIT-Station für PR #${pr} (Issue #${n}). Sie läuft VOR dem Merge-Lock: Du wartest nur auf grüne Checks und fixst Findings — du mergst NIE, führst KEIN gh pr merge aus und machst KEINE Merge-Vorchecks (das übernimmt die Merge-Station danach).
 1. ZUERST den Draft-Zustand klären, BEVOR du irgendwo wartest: gh pr view ${pr} -R ${SLUG} --json isDraft,headRefOid. Ist isDraft true, liefert die Review-Pipeline per Design keinen grünen Pflicht-Check (ihr prep-Job ist auf draft == false gefiltert, alles Weitere hängt an prep) — darauf zu warten ist aussichtslos: gh pr ready ${pr} -R ${SLUG} ausführen und draftAtEntry: true melden (war er kein Draft: draftAtEntry: false). headRefOid ist der HEAD-SHA des PR; du brauchst ihn in Schritt 3.
 2. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'} SKIPPED oder NEUTRAL zählt hier NIE als grün — genau so wird der Pflicht-Check gemeldet, wenn der prep-Job übersprungen wurde (Draft, aber auch ein bloßes Label-Event am PR). Dann EINMAL den Re-Trigger aus Schritt 3 auslösen; meldet er danach erneut SKIPPED, nicht weiter warten, sondern { green: false } mit der note "Pflicht-Check meldet SKIPPED — Branch-Protection würde mergen, Runner nicht; Operator-Entscheidung".
-3. Meldet gh "no checks reported" oder ist statusCheckRollup leer, wartest du NICHT die vollen 45 Minuten ins Leere: Läufe des Branch holen — gh run list -R ${SLUG} --branch ${branch} --limit 20 --json databaseId,headSha,status,conclusion,workflowName — und davon NUR die mit headSha == <headRefOid aus Schritt 1> zählen; das ist runsFound (bei jedem weiteren Blick aktualisieren, im Return steht der letzte Stand). Ohne diesen Filter zählst du Läufe fremder Commits desselben Branch mit, und in jedem Repo mit mehreren Workflows wäre runsFound immer > 0. Ist runsFound nach rund 10 Minuten immer noch 0, GENAU EINEN Re-Trigger auslösen: gh pr ready ${pr} --undo -R ${SLUG} && gh pr ready ${pr} -R ${SLUG} (der Draft-Toggle feuert ready_for_review; die beiden Befehle gehören zusammen — der PR bleibt in JEDEM Ausgang dieser Station ready, du lässt ihn nie als Draft zurück), retriggered: true melden und weiterwarten. Dieser eine Re-Trigger gilt für die ganze Station, auch wenn ihn Schritt 2 (SKIPPED) auslöst. Kommt danach immer noch kein Lauf, liegt die Ursache außerhalb dieses PRs: KEIN zweiter Re-Trigger, kein leerer Commit, kein gh run rerun — beenden wie in Schritt 6. Ist runsFound > 0, erscheint am PR aber kein Check, ebenfalls NICHT re-triggern: das ist ein anderer Befund (Läufe da, Checks nicht am PR verknüpft) und gehört genau so in die note.
-5. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget).
-6. Return { green: true, draftAtEntry, runsFound, retriggered } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün". Wird es nicht grün (45 Minuten um, keine Checks trotz Re-Trigger, Pflicht-Check bleibt SKIPPED oder Runden aufgebraucht): KEINEN Fehler werfen, sondern { green: false, draftAtEntry, runsFound, retriggered, note } zurückgeben, note in EINEM Satz mit dem Grund. Die drei Diagnosefelder IMMER füllen, auch im grünen Fall — der Workflow baut daraus die Meldung, die der Operator im Issue-Kommentar liest.`
+3. Meldet gh "no checks reported" oder ist statusCheckRollup leer, wartest du NICHT die vollen 45 Minuten ins Leere: Läufe des Branch holen — gh run list -R ${SLUG} --branch ${branch} --limit 20 --json databaseId,headSha,status,conclusion,workflowName — und davon NUR die mit headSha == <headRefOid aus Schritt 1> zählen; das ist runsFound (bei jedem weiteren Blick aktualisieren, im Return steht der letzte Stand). Ohne diesen Filter zählst du Läufe fremder Commits desselben Branch mit, und in jedem Repo mit mehreren Workflows wäre runsFound immer > 0. Ist runsFound nach rund 10 Minuten immer noch 0, GENAU EINEN Re-Trigger auslösen: gh pr ready ${pr} --undo -R ${SLUG} && gh pr ready ${pr} -R ${SLUG} (der Draft-Toggle feuert ready_for_review; die beiden Befehle gehören zusammen — der PR bleibt in JEDEM Ausgang dieser Station ready, du lässt ihn nie als Draft zurück), retriggered: true melden und weiterwarten. Dieser eine Re-Trigger gilt für die ganze Station, auch wenn ihn Schritt 2 (SKIPPED) auslöst. Kommt danach immer noch kein Lauf, liegt die Ursache außerhalb dieses PRs: KEIN zweiter Re-Trigger, kein leerer Commit, auch kein gh run rerun (es gibt keinen Lauf, den man wiederholen könnte — Schritt 4a greift nur bei einem ROTEN Lauf) — beenden wie in Schritt 6. Ist runsFound > 0, erscheint am PR aber kein Check, ebenfalls NICHT re-triggern: das ist ein anderer Befund (Läufe da, Checks nicht am PR verknüpft) und gehört genau so in die note.
+4. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''} ZUERST diagnostizieren, in welchem Step der Job gescheitert ist — VOR jeder Codeänderung: Run-ID des roten Laufs holen (gh run list -R ${SLUG} --branch ${branch} --limit 10 --json databaseId,workflowName,status,conclusion,headSha; ersatzweise die Run-ID aus dem link-Feld von gh pr checks ${pr} -R ${SLUG} --json name,state,link), dann gh run view <RUN_ID> -R ${SLUG} --json jobs (Name des gescheiterten Jobs UND seines gescheiterten Steps) und gh run view <RUN_ID> -R ${SLUG} --log-failed | tail -n 300 (nur die roten Steps, abgeschnitten, damit dein Kontext nicht überläuft). Ein rein informativer Check, der den Merge nicht blockiert, löst diese Diagnose NICHT aus.
+4a. INFRASTRUKTUR-Fall: der Job ist VOR dem eigentlichen Test-/Lint-/Review-Aufruf gescheitert (Checkout, Setup-Action, Dependency-Installation, Paketdownload, Runner-Provisionierung — das gilt auch für die Review-Pipeline selbst) ODER der Logauszug enthält eine dieser Signaturen (Teilstring genügt, Groß-/Kleinschreibung egal): ${JSON.stringify(INFRA_SIG)}. Das ist KEINE Aussage über den Code — nicht fixen, sondern neu messen: gh run rerun <RUN_ID> --failed -R ${SLUG}, dann zurück zu Schritt 2 und neu werten. Deckel: EIN Re-Run JE ROTEM LAUF und HÖCHSTENS ZWEI in dieser Station — --failed wirkt pro Lauf, und eine Infrastruktur-Störung trifft typischerweise mehrere Workflows gleichzeitig; scheitert derselbe Step nach seinem Re-Run erneut, ist er reproduzierbar und damit ein inhaltlicher Fall (Schritt 5). Diese Re-Runs zählen NICHT auf die ${rounds} Fix-Runde(n) aus Schritt 5 und sind auch bei 0 verbleibenden Fix-Runden erlaubt; die 45-Minuten-Grenze aus Schritt 2 gilt unverändert für die gesamte Wartezeit. Schlägt der Re-Run-Befehl selbst fehl (fehlende Actions-Rechte, Lauf zu alt), NICHT wiederholen und NICHT anderweitig neu starten — dann wie Schritt 5 behandeln und den Grund in die note. Hast du mindestens einmal neu gestartet, gib infraRerun: true zurück.
+5. INHALTLICHER FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''} (alles, was Schritt 4a nicht als Infrastruktur ausweist — der Test-/Lint-/Typecheck-Aufruf selbst ist rot oder das Review-Gate meldet Findings): P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget).
+6. Return { green: true, draftAtEntry, runsFound, retriggered, infraRerun } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün". Wird es nicht grün (45 Minuten um, keine Checks trotz Re-Trigger, Pflicht-Check bleibt SKIPPED oder Runden aufgebraucht): KEINEN Fehler werfen, sondern { green: false, draftAtEntry, runsFound, retriggered, infraRerun, note } zurückgeben, note in EINEM Satz mit dem Grund. Die vier Diagnosefelder IMMER füllen, auch im grünen Fall — der Workflow baut daraus die Meldung, die der Operator im Issue-Kommentar liest. infraRerun nur true, wenn du in Schritt 4a tatsächlich neu gestartet hast.`
 
 // Post-Merge-Beweis (Issue #32): Bis 0.7.0 war jeder nicht-grüne CI-Lauf auf dem
 // Default-Branch "rot" — auch ein ABGEBROCHENER. Lauf wf_1121fbd9-e9e (2026-08-01,
@@ -494,6 +523,12 @@ const runUnit = async (u) => {
   // selbst, wird diese Zeile nie erreicht und die Meldung hat keinen
   // Diagnose-Block; das ist der bewusst degradierte Pfad.
   const gateDiag = gateDiagOf(wait)
+  // Ausnahme vom maxFixRounds-Automaten sichtbar machen (Issue #36): der
+  // Operator soll die flakige CI seines Zielrepos im Lauf-Protokoll sehen, ohne
+  // dass eine Einheit dafür bestraft wurde. Bewusst OHNE Runden-Zahl — die
+  // Station meldet nicht zurück, wie viele Fix-Runden sie intern verbraucht hat,
+  // fixRounds wäre hier systematisch zu niedrig.
+  if (gateDiag.infraRerun) LOG(`#${n} Gate-Wait: CI-Infrastruktur-Re-Run (gh run rerun --failed) war nötig — er zählt NICHT auf maxFixRounds.`)
   if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'} ${gateDiagText(gateDiag)}`)
   const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)

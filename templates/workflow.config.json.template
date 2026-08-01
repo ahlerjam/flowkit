@@ -70,6 +70,7 @@
   "maxFixRounds": 3,
   "progressStopAfter": 3,
   "mergeCheck": "coordinator",
+  "ciInfraSignatures": [],
   "overrideLabel": "override-claude-review",
   "markers": {
     "plan": "<!-- plan:v1 -->",

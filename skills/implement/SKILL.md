@@ -185,13 +185,27 @@ statt still ewig zu blockieren.
    (`gh run list --branch`, gefiltert auf `headSha` — ungefiltert wäre die Zahl
    in jedem Multi-Workflow-Repo immer > 0) und löst GENAU EINEN Re-Trigger aus
    (Draft-Toggle); danach wird nicht weiter getriggert, und der PR bleibt in
-   jedem Ausgang `ready`. Bei FAILURE P0/P1 adressieren (Restbudget aus
-   maxFixRounds) — parallele Einheiten warten so nicht auf fremde CI, der Lock
-   serialisiert nur noch das Mergen. Wird es nicht grün, meldet die Station
-   `{ green: false, draftAtEntry, runsFound, retriggered, note }` statt zu
-   werfen; der Workflow hängt diese Diagnose an die `GATE:`-Meldung und führt sie
-   als `done[].gateDiag` mit — auch im grünen Fall, sonst hinterlässt ein still
-   geheilter Draft keine Spur. Nur ein geworfener Fehler kommt ohne Diagnose an.
+   jedem Ausgang `ready`. Bei FAILURE des Pflicht-Checks steht ZUERST die
+   Diagnose, in welchem Step der Job gescheitert ist (`gh run view --json jobs`
+   plus `--log-failed | tail`): scheitert er VOR dem eigentlichen
+   Test-/Lint-/Review-Aufruf (Checkout, Setup-Action, Dependency-Installation,
+   Paketdownload, Runner-Provisionierung) oder trägt der Log eine
+   Infrastruktur-Signatur (`operation timed out`, `Failed to download`,
+   `error sending request for url`, `Could not resolve host`,
+   `The runner has received a shutdown signal`, dazu CONFIG.ciInfraSignatures),
+   ist das keine Aussage über den Code: `gh run rerun <RUN_ID> --failed`, dann
+   neu werten — ein Re-Run je rotem Lauf, höchstens zwei je Station (`--failed`
+   wirkt pro Lauf, eine Störung trifft meist mehrere Workflows). Dieser Re-Run
+   zählt NICHT auf maxFixRounds und ist auch bei erschöpftem Fix-Budget erlaubt;
+   die 45-Minuten-Grenze gilt unverändert. Scheitert derselbe Step erneut, ist er
+   reproduzierbar und wird inhaltlich behandelt. Erst dann P0/P1 adressieren
+   (Restbudget aus maxFixRounds) — parallele Einheiten warten so nicht auf fremde
+   CI, der Lock serialisiert nur noch das Mergen. Wird es nicht grün, meldet die
+   Station `{ green: false, draftAtEntry, runsFound, retriggered, infraRerun,
+   note }` statt zu werfen; der Workflow hängt diese Diagnose an die
+   `GATE:`-Meldung und führt sie als `done[].gateDiag` mit — auch im grünen Fall,
+   sonst hinterlässt ein still geheilter Draft keine Spur. Nur ein geworfener
+   Fehler kommt ohne Diagnose an.
 7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
@@ -212,7 +226,9 @@ statt still ewig zu blockieren.
    solange niemand sonst mergt, kann `cancel-in-progress` den eigenen Lauf
    nicht abbrechen. Ein Merge passiert NIE außerhalb des Locks.
    Alle Fix-Runden aus 4.-6. zählen zusammen auf das EINE issue-globale
-   CONFIG.maxFixRounds.
+   CONFIG.maxFixRounds. Einzige Ausnahme: der CI-Infrastruktur-Re-Run aus
+   Station 6 — er ändert keine Zeile Code und misst nur neu, also wäre eine
+   Fix-Runde dafür eine Strafe für fremde Infrastruktur.
 8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).

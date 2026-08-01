@@ -124,6 +124,14 @@ niemand wach bleiben muss:
   Einheiten in Folge ohne Merge, hält der Lauf an und meldet es — eine Nacht,
   in der nichts mehr gelingt (ausgefallener Permission-Classifier, gh-Ausfall,
   kaputte CI), wird nicht in voller Länge durchgebrannt.
+- **CI-Infrastruktur wird wiederholt, nicht gefixt:** scheitert ein Job vor dem
+  eigentlichen Testaufruf (Paketdownload, Runner-Provisionierung, Checkout) oder
+  trägt sein Log eine bekannte Infrastruktur-Signatur (erweiterbar über
+  `ciInfraSignatures`), antwortet die Gate-Wait-Station mit `gh run rerun
+  --failed` statt mit einer Fix-Runde — ein Re-Run je rotem Lauf, höchstens zwei.
+  Er zählt nicht auf `maxFixRounds`: ein PyPI-Ausrutscher um drei Uhr kostet
+  nachts keine Einheit mehr. Scheitert derselbe Step erneut, ist er
+  reproduzierbar und wird wieder inhaltlich behandelt.
 - **Merge nur über das serverseitige Gate:** `mergeCheck` muss grün sein, die
   Branch-Protection aus Schritt 1.2 erzwingt es unabhängig vom Agenten; gemergt
   wird ausschließlich im Merge-Lock, semantische Konflikte brechen ab

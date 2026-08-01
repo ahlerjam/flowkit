@@ -208,6 +208,12 @@
       "type": "string",
       "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün"
     },
+    "ciInfraSignatures": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "zusätzliche Logsignaturen, die die Gate-Wait-Station als CI-Infrastruktur (statt Code) wertet und mit `gh run rerun --failed` beantwortet, bevor eine Fix-Runde ausgelöst wird — ein Re-Run je rotem Lauf, höchstens zwei je Station. Ergänzt die eingebauten Signaturen (operation timed out, Failed to download, error sending request for url, Could not resolve host, The runner has received a shutdown signal), ersetzt sie nie. Für repo-eigene Infrastruktur gedacht (selbstgehostete Runner, interne Registry). Leere Strings sind unzulässig — sie wären Teilstring jedes Logs und würden jeden roten Check zur Infrastruktur erklären."
+    },
     "overrideLabel": {
       "type": "string"
     },

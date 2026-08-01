@@ -45,6 +45,14 @@ directly — the install arrives as a pull request.
   with a `budget-exceeded` label and a draft PR instead of burning tokens.
 - **Issue-global fix-round state machine** (`maxFixRounds`): exactly one model
   escalation, then `needs-human` — the run moves on, never loops.
+- **Infrastructure is retried, not debugged:** when a CI job dies before the
+  test call (checkout, setup action, package download, runner provisioning) or
+  its log carries a known infrastructure signature, the gate answers with
+  `gh run rerun --failed` instead of a fix round — one rerun per red run, at
+  most two per station. It never counts against `maxFixRounds`, so a broken
+  package mirror no longer sends a unit to `needs-human`. A step that fails
+  again is reproducible and is treated as a code problem. Extend the signature
+  list via `ciInfraSignatures`.
 - **Auto-merge only with active branch protection**; post-merge smoke check with
   a configurable `onSmokeFailure` policy (`revert` by default).
 - **The builder's claim is checked against GitHub**, not believed: a `pr-check`

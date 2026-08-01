@@ -56,6 +56,19 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   was unavailable — is a technical error instead of a silent success, a
   reported `pr: 0` is healed from the gh result instead of failing the unit,
   and a claimed skip is only accepted with a merged PR on GitHub. (#31, #33)
+- A CI job that dies in its setup phase (package download, runner provisioning,
+  checkout) is no longer debugged as if it were a test failure: gate-wait first
+  diagnoses which step failed (`gh run view --json jobs`, `--log-failed`) and
+  answers a known infrastructure signature with `gh run rerun --failed` before
+  spending a fix round — one rerun per red run, at most two per station, since
+  `--failed` acts per run and one outage usually hits several workflows. The
+  rerun never counts against `maxFixRounds` and stays allowed once the fix
+  budget is exhausted; a step that fails again is reproducible and is treated as
+  a code problem. Repo-specific signatures via the new `ciInfraSignatures`
+  config field (empty strings rejected — they would match every log). Whether a
+  rerun happened is readable in the run report as `done[].gateDiag.infraRerun`
+  and is named in the `GATE:` message, so it survives the needs-human path as
+  well. (#36)
 - `/flowkit:setup` allowlists the plugin's own script paths
   (`bash <pluginRoot>/scripts/*`, `python3 <pluginRoot>/scripts/*`,
   `bash <pluginRoot>/templates/hooks/*`) plus previously missing prefixes
