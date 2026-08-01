@@ -11,6 +11,11 @@
       "Bash(gh label list*)", "Bash(gh api repos/*/branches/*/protection)",
       "Bash(git push*)", "Bash(git switch*)", "Bash(git merge*)",
       "Bash(jq *)", "Bash(mktemp*)",
+      "Bash(bash {{PLUGIN_ROOT}}/scripts/*)", "Bash(python3 {{PLUGIN_ROOT}}/scripts/*)",
+      "Bash(bash {{PLUGIN_ROOT}}/templates/hooks/*)",
+      "Bash(gh pr edit*)", "Bash(gh run rerun*)",
+      "Bash(git check-ignore*)", "Bash(git merge-base*)", "Bash(git revert*)",
+      "Bash(tail*)", "Bash(head*)", "Bash(awk *)", "Bash(sort*)", "Bash(uniq*)",
       {{STACK_ALLOW}}
     ],
     "deny": [

@@ -63,13 +63,26 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    bräuchte GraphQL-Mutationen — rote Linie). Kein Runner-Board-Sync in Stufe 1.
 5. **Hooks + Settings:** `${CLAUDE_PLUGIN_ROOT}/templates/hooks/*.sh` nach `.claude/hooks/`
    kopieren, `chmod +x`. `${CLAUDE_PLUGIN_ROOT}/templates/settings.json.template` nach
-   `.claude/settings.json` (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen).
+   `.claude/settings.json` (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen —
+   EINE Ausnahme: Allow-Einträge, die auf `…/scripts/*` bzw. `…/templates/hooks/*` matchen
+   und NICHT dem aktuellen `${CLAUDE_PLUGIN_ROOT}` entsprechen, werden ERSETZT statt behalten;
+   sonst wächst bei jedem Plugin-Update eine tote Zeile mit altem Pfad dazu).
    Platzhalter ersetzen: {{PROTECTED_BRANCHES}} aus CONFIG.defaultBranch (+ master),
    {{OVERRIDE_LABEL}} aus CONFIG.overrideLabel, {{STACK_ALLOW}} = Allow-Zeilen für die
    Kommandopräfixe aus CONFIG.commands/extraGates (z. B. "Bash(uv run *)"), {{FORMAT_CMD_PY}}
-   = Format-Kommando des Repos oder `true` wenn keins. Danach validieren:
+   = Format-Kommando des Repos oder `true` wenn keins.
+   {{PLUGIN_ROOT}} = der ABSOLUTE Pfad aus `${CLAUDE_PLUGIN_ROOT}`, ohne Trailing-Slash
+   und ohne Anführungszeichen wörtlich in die Muster eingesetzt. Er gibt den
+   Plugin-eigenen Skripten (Worktree-Cleanup, `budget_report.py`, Hook-Tests) eine
+   Allowlist-Regel; ohne sie fällt jeder dieser Aufrufe an den Permission-Classifier
+   zurück, dessen Ausfall einen kompletten Lauf gekippt hat (Issue #31). ACHTUNG: der
+   Pfad ändert sich bei Neuinstallation oder Update des Plugins — danach `/flowkit:setup`
+   erneut laufen lassen (der Drift-Hinweis des SessionStart-Hooks erinnert daran).
+   Danach validieren:
    `python3 -m json.tool .claude/settings.json >/dev/null` (das Template selbst ist
-   wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein)
+   wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein),
+   `! grep -q '{{' .claude/settings.json` (kein unsubstituierter Platzhalter; bewusst
+   als negiertes `grep -q`, weil `grep -c` im Gutfall mit Exit-Code 1 endet)
    und gegen die INSTALLIERTE Fassung testen:
    `bash ${CLAUDE_PLUGIN_ROOT}/templates/hooks/test-pretooluse-blocker.sh .claude/hooks/pretooluse-blocker.sh`.
    Danach **Versions-Stempel:** `PLUGIN_VERSION` aus

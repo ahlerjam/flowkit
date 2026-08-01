@@ -68,6 +68,7 @@
     "gapScan": "off"
   },
   "maxFixRounds": 3,
+  "progressStopAfter": 3,
   "mergeCheck": "coordinator",
   "overrideLabel": "override-claude-review",
   "markers": {

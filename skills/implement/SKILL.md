@@ -153,30 +153,44 @@ statt still ewig zu blockieren.
    PR mit `Closes #N` und der Task-Checkliste des Plans als `### Tasks` im PR-Body
    (erledigt = abgehakt; ohne Plan entfällt der Abschnitt; Fix-Runden hängen ihre
    Punkte abgehakt an, die Liste wird nie gekürzt). Merged nie selbst.
-3. **AC-Verifier:** frisch, Input nur Issue-Body + PR-Diff, Widerlegungsauftrag,
+3. **PR-Check** (haiku, Weltzustand): `gh pr list --search "Closes #N" --state all`
+   direkt nach dem Builder. Ab hier zählt ausschließlich, was gh sagt: PR-Nummer
+   UND Branch der Folgestationen kommen aus diesem Befund, nicht aus dem
+   Builder-Return (heilt ein gemeldetes `pr: 0`, Issue #33). Findet gh keinen
+   PR mit `Closes #N` im Body, ist das ein TECHNISCHER Fehler der Bau-Station,
+   kein `needs-human` — ein Agent, der wegen fehlender Tool-Rechte nichts
+   ausrichten konnte, ist kein Erfolg (Issue #31). Ein vom Builder gemeldetes
+   `skipped` wird nur akzeptiert, wenn gh dazu einen GEMERGTEN PR ausweist;
+   meldet gh MERGED, obwohl der Builder gebaut hat, endet die Einheit als
+   Erledigung ohne zweiten Merge-Versuch. Mehrere offene Treffer sind mehrdeutig
+   (nicht raten), CLOSED und ein leerer Branchname sind kein verwertbarer Befund.
+   Die Station läuft NACH dem Budgetcheck: ein Builder, der sein Budget sprengt,
+   hat meist noch keinen PR — sonst würde aus einem sauberen Budget-Abbruch ein
+   technischer Fehler.
+4. **AC-Verifier:** frisch, Input nur Issue-Body + PR-Diff, Widerlegungsauftrag,
    Urteil als PR-Kommentar `<!-- ac-verify:v2 -->` — Tabelle plus maschinenlesbarer
    JSON-Block `{"verdicts":[{"ac","met","evidence"}]}`, ein Eintrag je AC.
    Folgerunden lesen den vorherigen Block, die Fix-Runde erhält das vorherige
    Verdict, und jede Regression (met → unmet) wird explizit ausgewiesen.
-4. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
+5. **Security-Pass** (nur wenn ein `area/*` in CONFIG.protectedAreas liegt): eigener
    frischer Agent VOR dem Merge (Injection, AuthZ, Secrets, Test-Gaming-Querblick).
-5. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
+6. **Gate-Wait** (OHNE Merge-Lock): CONFIG.mergeCheck abwarten (45-Minuten-Cap),
    bei FAILURE P0/P1 adressieren (Restbudget aus maxFixRounds) — parallele
    Einheiten warten so nicht auf fremde CI, der Lock serialisiert nur noch das
    Mergen.
-6. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
+7. **Merge** (IM Merge-Lock, serialisiert): Override-/malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
    (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
    Post-Merge-CI + CONFIG.commands.smoke (falls gesetzt; rot →
    onSmokeFailure-Policy + keine weiteren Merges). Ein Merge passiert NIE
    außerhalb des Locks.
-   Alle Fix-Runden aus 3.-5. zählen zusammen auf das EINE issue-globale
+   Alle Fix-Runden aus 4.-6. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds.
-7. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
+8. **Post-Merge-Cleanup** (best-effort): Builder-Worktree entfernen und den
    lokalen Feature-Branch löschen — der Erfolgspfad hinterlässt sonst
    Worktree-Drift (Erstlauf-Befund 2026-07-26).
-8. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
+9. **Learnings** (best-effort, nur nach echtem Merge, `CONFIG.learnings` ≠ false):
    destilliert das ÜBERTRAGBARE Wissen der Einheit nach
    `.flowkit/learnings/<issue>-<slug>.md` — Frontmatter (issue, pr, area, date)
    plus „Was funktionierte" / „Fallen", zusammen höchstens ~15 Zeilen. Gemeint
@@ -196,9 +210,20 @@ statt still ewig zu blockieren.
   PR bleibt als Draft mit Kommentar; der LAUF fährt mit dem nächsten Issue fort.
   Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2 laufen Fixes genau
   eine Modellstufe höher (CONFIG.models.escalation).
-- **Technischer Fehler** (Crash, Infra, gh-Ausfall): erster Fehler → Cleanup +
-  Queue-Ende (transient); zweiter technischer Fehler derselben Einheit → Lauf
-  stoppt mit Bericht.
+- **Technischer Fehler** (Crash, Infra, gh-Ausfall, ODER: nach dem Builder ist
+  auf GitHub kein verwertbarer PR zum Issue nachweisbar — siehe Station 3):
+  erster Fehler → Cleanup + Queue-Ende (transient); zweiter technischer Fehler
+  derselben Einheit → Lauf stoppt mit Bericht. Weil das Requeue ans Queue-ENDE
+  geht, greift diese Regel bei langen Queues erst spät — dafür gibt es den
+  Fortschritts-Circuit-Breaker.
+- **Kein Fortschritt im Lauf** (`CONFIG.progressStopAfter`, Default 3): enden so
+  viele abgeschlossene Einheiten IN FOLGE ohne Merge — `needs-human`,
+  Budget-Abbruch oder technischer Fehler —, hält der Lauf an und nennt den Grund
+  im Bericht (`stopped.reason` beginnt mit „Fortschritts-Circuit-Breaker").
+  Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück;
+  dauerhaft blockierte Einheiten zählen nicht mit (sie laufen nie an). `0`
+  schaltet den Breaker ab. Grund: ein Lauf, der 23 Einheiten ohne einen
+  einzigen PR durchreicht, soll nicht bis zum Ende brennen (Issue #31).
 - **Budget-Überschreitung je Issue** (nur bei `parallelism: 1` — nur dort ist das
   Delta von `budget.spent()` einer Einheit zurechenbar) → Einheit sauber
   abgebrochen (Kommentar, Label `budget-exceeded`, PR auf Draft,
@@ -227,10 +252,18 @@ statt still ewig zu blockieren.
 
 ## Ground Truth und Resume
 
-„gemergt/grün/erledigt" gilt nur nach gh-Verifikation, nie aus Agent-JSON. Nach
+„gemergt/grün/erledigt" gilt nur nach gh-Verifikation, nie aus Agent-JSON — und
+seit 0.8.0 gilt dasselbe für „PR gebaut" und „war schon erledigt": die
+PR-Check-Station (Station 3) holt Nummer, Branch und Zustand des PR bei gh; ein
+Builder-Return ohne Entsprechung auf GitHub ist kein Ergebnis. Nach
 Abbruch in derselben Session: denselben Workflow mit `resumeFromRunId` starten —
 erledigte Einheiten kommen aus dem Cache. Über Session-Grenzen hinweg ist der
 Scope-Modus `resume` der Weg zurück zu liegengebliebener Arbeit.
+Beim Stop durch den Fortschritts-Circuit-Breaker sieht der Bericht bewusst
+ungewohnt aus: die auslösende Einheit steht gleichzeitig in `stopped.issue` UND
+in `remaining` — sie wurde als transienter technischer Fehler requeued, bevor der
+Breaker den Lauf anhielt. `failed` bleibt dabei leer: endgültig gescheitert ist
+sie nicht, sie kommt im nächsten Lauf unverändert wieder dran.
 Nach JEDEM Lauf-Ende den Lauf-Bericht persistieren:
 `.flowkit/runs/<YYYY-MM-DDTHH-MM>-<scope>.json` — Inhalt: das Return-Objekt des
 Workflows plus `scope` (der aufgelöste Auftrag) und `startedAt`. `.flowkit/` ist

@@ -34,7 +34,7 @@ directly — the install arrives as a pull request.
 |---|---|---|
 | Idea → issue | `/flowkit:issue impuls "<one sentence>"` | Full spec issue (What/Why/Scope/AC + labels); low-risk issues become `agent-ready` automatically |
 | AI finds work | `/flowkit:issue gaps <area> [max N]` | Spec issues labeled `needs-triage` — flipping the label to `agent-ready` is your only mandatory touchpoint |
-| Work it off | `/flowkit:implement next N \| issues A,B \| epic N \| milestone "X" [max X]` | Autonomous run: Planner → Builder (TDD, isolated worktree) → fresh AC verifier → PR deep review → auto squash-merge → post-merge smoke |
+| Work it off | `/flowkit:implement next N \| issues A,B \| epic N \| milestone "X" [max X]` | Autonomous run: Planner → Builder (TDD, isolated worktree) → PR check against GitHub → fresh AC verifier → PR deep review → auto squash-merge → post-merge smoke |
 | Pick up stranded work | `/flowkit:implement resume [all]` | Re-opens `budget-exceeded` (with `all`: also `needs-human`) issues that have an open PR — the builder continues the existing branch instead of starting over; human commits on the branch are treated as ground truth |
 | Lagebild | `/flowkit:status` | Read-only dashboard: label queues, stranded work, recent runs, budget calibration, template drift |
 | Nachtlauf einrichten | `/flowkit:nightly` | Guardrail-gated setup of an unattended nightly `implement` run |
@@ -47,6 +47,14 @@ directly — the install arrives as a pull request.
   escalation, then `needs-human` — the run moves on, never loops.
 - **Auto-merge only with active branch protection**; post-merge smoke check with
   a configurable `onSmokeFailure` policy (`revert` by default).
+- **The builder's claim is checked against GitHub**, not believed: a `pr-check`
+  station resolves the PR via `gh pr list --search "Closes #<n>"` right after the
+  build, and every later station uses that number and branch. No PR on GitHub is
+  a technical error, not a silent success.
+- **A run that stops making progress stops** (`progressStopAfter`, default 3):
+  after that many consecutive units without a merge the run halts and reports
+  why, instead of burning the whole queue on a broken environment. A merge or a
+  gh-verified skip resets the counter; `0` disables the breaker.
 - **GitHub-native issue dependencies are respected** (`blocked by`, set via
   `gh issue edit --add-blocked-by`): blockers run first, blocked issues never
   occupy a slot, and anything that stays blocked is reported instead of retried

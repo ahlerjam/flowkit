@@ -120,6 +120,10 @@ niemand wach bleiben muss:
   Worktree-Cleanup — statt die Nacht durchzubrennen. Der Lauf macht weiter.
 - **Issue-globale Fix-Runden** (`maxFixRounds`) mit genau EINER Modell-Eskalation,
   danach `needs-human`: keine Endlosschleife, der Lauf geht zum nächsten Issue.
+- **Fortschritts-Circuit-Breaker** (`progressStopAfter`, Default 3): enden drei
+  Einheiten in Folge ohne Merge, hält der Lauf an und meldet es — eine Nacht,
+  in der nichts mehr gelingt (ausgefallener Permission-Classifier, gh-Ausfall,
+  kaputte CI), wird nicht in voller Länge durchgebrannt.
 - **Merge nur über das serverseitige Gate:** `mergeCheck` muss grün sein, die
   Branch-Protection aus Schritt 1.2 erzwingt es unabhängig vom Agenten; gemergt
   wird ausschließlich im Merge-Lock, semantische Konflikte brechen ab

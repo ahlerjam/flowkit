@@ -8,6 +8,30 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+### Added
+- `pr-check` station: right after the builder the runner asks GitHub itself
+  (`gh pr list --search "Closes #<n>" --state all`) and takes PR number, branch
+  and state from that answer. Every later station works off the verified PR.
+  Ambiguous matches, a closed PR and an empty branch name are all treated as
+  "no usable result". (#31, #33)
+- Progress circuit breaker: a run now stops after `progressStopAfter`
+  consecutive units without a merge (needs-human, budget abort or technical
+  error); a merge or a gh-verified skip resets the counter, blocked units do
+  not count. Default 3, `0` disables it. (#31)
+
+### Fixed
+- A builder that produced no PR — e.g. because the Bash permission classifier
+  was unavailable — is a technical error instead of a silent success, a
+  reported `pr: 0` is healed from the gh result instead of failing the unit,
+  and a claimed skip is only accepted with a merged PR on GitHub. (#31, #33)
+- `/flowkit:setup` allowlists the plugin's own script paths
+  (`bash <pluginRoot>/scripts/*`, `python3 <pluginRoot>/scripts/*`,
+  `bash <pluginRoot>/templates/hooks/*`) plus previously missing prefixes
+  (`gh pr edit`, `gh run rerun`, `git check-ignore`, `git merge-base`,
+  `git revert`, `tail`, `head`, `awk`, `sort`, `uniq`), and the runner no
+  longer quotes those paths unnecessarily — Bash permission rules are prefix
+  patterns, so a leading quote made every such rule useless. (#31)
+
 ## [0.7.0] - 2026-07-31
 
 ### Added

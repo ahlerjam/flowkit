@@ -2,7 +2,9 @@
 // Testet die Scheduler-Logik von workflows/implement.workflow.js (pickNext,
 // Cap-Kohärenz, tote Blocker, Zyklus-Erkennung, WAIT-Signal, withMergeLock,
 // per-Issue-Budget-Deckel, Lauf-Gesamtdeckel inkl. deferredByBudget,
-// Learnings-Station, needs-human, Stop nach doppeltem technischem Fehler) mit
+// Learnings-Station, needs-human, Stop nach doppeltem technischem Fehler,
+// PR-Check-Station gegen den Weltzustand, Fortschritts-Circuit-Breaker,
+// Allowlist-taugliche Quotierung der Plugin-Script-Pfade) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
 // Harness: die Engine stellt dem Workflow-Script Globals bereit (args, log,
@@ -38,6 +40,9 @@ const defaultResponse = (label) => {
   const n = m ? Number(m[1]) : 0
   if (label === 'preflight') return { clean: true }
   if (/^build /.test(label)) return { pr: 100 + n, branch: `feat/${n}-x`, skipped: false }
+  // Deckungsgleich mit dem build-Default: die PR-Nummer der Folgestationen kommt
+  // seit 0.8.0 aus dem gh-Befund, nicht aus dem Builder-Return.
+  if (/^pr-check /.test(label)) return { found: true, pr: 100 + n, branch: `feat/${n}-x`, state: 'OPEN' }
   if (/^ac-verify/.test(label)) return { pass: true, unmet: [] }
   if (/^security/.test(label)) return { blockers: [] }
   if (/^gate-wait /.test(label)) return { green: true }
@@ -49,7 +54,7 @@ const defaultResponse = (label) => {
 // agent()-Aufruf bekommt startSeq (vor dem Handler) und endSeq (nach dem
 // Handler) aus einem gemeinsamen Zähler — damit sind Reihenfolge UND
 // Überlappung von Stationen assertierbar.
-async function runWorkflow({ units, config, budget, respond } = {}) {
+async function runWorkflow({ units, config, budget, respond, pluginRoot } = {}) {
   const calls = []
   const logs = []
   let seq = 0
@@ -64,7 +69,7 @@ async function runWorkflow({ units, config, budget, respond } = {}) {
   }
   const parallel = (thunks) => Promise.all(thunks.map((t) => t()))
   const b = budget !== undefined ? budget : { spent: () => 0 }
-  const report = await workflow({ config, units }, (m) => logs.push(String(m)), agent, parallel, b, () => {})
+  const report = await workflow({ config, units, pluginRoot }, (m) => logs.push(String(m)), agent, parallel, b, () => {})
   return { report, calls, logs }
 }
 
@@ -368,14 +373,20 @@ test('Technischer Doppel-Fehler: ein Requeue, dann Stop mit failed', async () =>
 })
 
 // Zusatz: skipped-Pfad — ein bereits erledigtes Issue zählt als Erledigung
-// und gibt seine Abhängigen frei (doneOk, nicht unresolved).
+// und gibt seine Abhängigen frei (doneOk, nicht unresolved). Seit 0.8.0 nur noch
+// MIT gh-Beleg: der pr-check muss einen GEMERGTEN PR ausweisen.
 test('skipped: bereits erledigter Blocker gibt Abhängige frei', async () => {
   const { report, calls } = await runWorkflow({
     units: [unit(1), unit(2, { blockedBy: [1] })],
     config: cfg(),
-    respond: (c) => (c.label === 'build #1' ? { pr: 0, branch: '', skipped: true, note: 'bereits gemergt' } : undefined),
+    respond: (c) => {
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: true, note: 'bereits gemergt' }
+      if (c.label === 'pr-check #1') return { found: true, pr: 181, branch: 'feat/1-x', state: 'MERGED' }
+      return undefined
+    },
   })
   assert.equal(doneOf(report, 1).skipped, true)
+  assert.equal(doneOf(report, 1).pr, 181, 'die Nummer des gemergten PR kommt aus dem gh-Befund')
   none(calls, /^(ac-verify|gate-wait|gate-merge)(\+\d+)? #1$/)
   assert.equal(doneOf(report, 2).pr, 102, 'skip des Blockers muss #2 freigeben')
   assert.deepEqual(report.blocked, [])
@@ -431,6 +442,265 @@ test('Learnings: learnings=false schaltet Station und Lese-Schritt ab', async ()
   none(calls, /^learnings /)
   assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'plan #1').prompt))
   assert.ok(!/\.flowkit\/learnings/.test(only(calls, 'build #1').prompt))
+})
+
+// ---------------------------------------------------------------------------
+// PR-Check-Station: der Weltzustand auf GitHub schlägt den Builder-Return
+// (Issue #31, löst #33)
+// ---------------------------------------------------------------------------
+
+// 10. Der Builder meldet pr:0 (klassischer Befund bei ausgefallenem
+//     Permission-Classifier) — gh kennt den PR trotzdem. Ab hier zählt nur gh:
+//     Nummer UND Branch der Folgestationen kommen aus dem Befund.
+test('pr-check: die PR-Nummer kommt von gh, ein Builder-pr:0 wird geheilt', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: false }
+      if (c.label === 'pr-check #1') return { found: true, pr: 581, branch: 'feat/1-gh', state: 'OPEN' }
+      return undefined
+    },
+  })
+  const chk = only(calls, 'pr-check #1')
+  assert.equal(chk.opts.model, 'haiku', 'die Station ist mechanisch — haiku genügt')
+  assert.ok(only(calls, 'build #1').endSeq < chk.startSeq, 'der pr-check läuft NACH dem Builder')
+  assert.ok(chk.prompt.includes('gh pr list -R acme/demo --search "Closes #1" --state all'),
+    'der pr-check muss gh mit --state all befragen')
+  assert.ok(!/\bpr:\s*0\b/.test(chk.prompt) && !chk.prompt.includes('581'),
+    'die Behauptung des Builders darf NICHT im Prompt stehen (sonst ist Nachplappern nicht von Prüfen unterscheidbar)')
+  assert.equal(doneOf(report, 1).pr, 581, 'die PR-Nummer stammt aus dem gh-Befund, nicht aus dem Builder-Return')
+  const ac = only(calls, 'ac-verify #1')
+  assert.ok(/gh pr view 581/.test(ac.prompt) && /gh pr diff 581/.test(ac.prompt),
+    'der AC-Verifier muss auf den gh-verifizierten PR zeigen')
+  assert.ok(only(calls, 'gate-wait #1').prompt.includes('feat/1-gh'),
+    'der Branch der Gate-Stationen kommt aus dem gh-Befund (headRefName)')
+  none(calls, /^needs-human /)
+  assert.equal(report.stopped, null)
+})
+
+// 11. Kernbefund des Issues: der Builder BEHAUPTET einen PR, gh kennt keinen.
+//     Das ist ein technischer Fehler (Requeue, dann Stop) — kein stiller Erfolg
+//     und kein inhaltliches needs-human.
+test('pr-check: kein PR auf GitHub = technischer Fehler, kein stiller Erfolg', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^pr-check /.test(c.label)
+      ? { found: false, pr: 0, branch: '', state: 'NONE', note: 'gh nicht ausführbar: classifier unavailable' }
+      : undefined),
+  })
+  none(calls, /^ac-verify/)
+  none(calls, /^gate-(wait|merge) /)
+  none(calls, /^needs-human /)
+  assert.equal(find(calls, 'build #1').length, 2, 'ein Requeue, dann Stop')
+  assert.equal(find(calls, 'cleanup #1').length, 2, 'Cleanup gehört zu jedem Fehlversuch')
+  assert.deepEqual(report.failed, [1])
+  assert.ok(/Kein PR zu Issue #1/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.ok(/classifier unavailable/.test(report.stopped.reason), 'der gh-Befund gehört wörtlich in den Bericht')
+  assert.ok(!report.done.some((d) => d.issue === 1), 'eine Einheit ohne PR darf nie in done landen')
+})
+
+// 12. Ein behauptetes "skipped" ist die teuerste Falschmeldung: die Einheit gilt
+//     als erledigt UND gibt Abhängige frei. Ohne gemergten PR bei gh: Fehler.
+test('pr-check: "skipped" ohne gemergten PR wird nicht als Erledigung verbucht', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: true, note: 'sieht erledigt aus' }
+      if (c.label === 'pr-check #1') return { found: false, pr: 0, branch: '', state: 'NONE', note: 'kein Treffer' }
+      return undefined
+    },
+  })
+  assert.ok(!report.done.some((d) => d.issue === 1 && d.skipped), 'unbelegtes skipped darf keine Erledigung sein')
+  assert.deepEqual(report.failed, [1])
+  assert.ok(/keinen gemergten PR/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  none(calls, /#2\b/)
+  assert.deepEqual(report.remaining, [2], '#2 darf nicht durch ein unbelegtes skipped freigegeben werden')
+})
+
+// 13. Belegtes skipped bei skipped=false: der Builder hat gebaut, gh sagt
+//     "schon gemergt" (fremder Merge dazwischen). Kein zweiter Merge-Versuch,
+//     aber eine echte Erledigung — Abhängige werden frei.
+test('pr-check: gh meldet MERGED — Einheit endet als Erledigung ohne Merge-Versuch', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg(),
+    respond: (c) => (c.label === 'pr-check #1'
+      ? { found: true, pr: 191, branch: 'feat/1-x', state: 'MERGED', note: 'war schon gemergt' }
+      : undefined),
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.skipped, true)
+  assert.equal(d1.pr, 191)
+  none(calls, /^(ac-verify|gate-wait|gate-merge)(\+\d+)? #1$/)
+  assert.equal(doneOf(report, 2).pr, 102, 'eine gh-belegte Erledigung gibt Abhängige frei')
+  assert.ok(logs.some((l) => /bereits gemergt/.test(l)), 'LOG zum bereits gemergten PR fehlt')
+  assert.equal(report.stopped, null)
+})
+
+// 14. Existenz ist nicht Verwertbarkeit: ein CLOSED-PR und ein Befund ohne
+//     Branchnamen dürfen die Folgestationen nicht erreichen (sonst liefe
+//     `git worktree add <tmp>` mit leerem Argument bzw. auf totem PR).
+test('pr-check: CLOSED und leerer Branch sind kein verwertbarer Befund', async () => {
+  const closed = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^pr-check /.test(c.label) ? { found: true, pr: 77, branch: 'feat/1-x', state: 'CLOSED' } : undefined),
+  })
+  none(closed.calls, /^ac-verify/)
+  assert.deepEqual(closed.report.failed, [1])
+  assert.ok(/ist CLOSED, nicht OPEN/.test(closed.report.stopped.reason), `Stop-Grund war: ${closed.report.stopped.reason}`)
+
+  const noBranch = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^pr-check /.test(c.label) ? { found: true, pr: 77, branch: '', state: 'OPEN' } : undefined),
+  })
+  none(noBranch.calls, /^ac-verify/)
+  assert.deepEqual(noBranch.report.failed, [1])
+  assert.ok(/Kein PR zu Issue #1/.test(noBranch.report.stopped.reason), `Stop-Grund war: ${noBranch.report.stopped.reason}`)
+})
+
+// 15. Reihenfolge: der Budgetcheck läuft VOR der Station. Ein Builder, der sein
+//     Budget sprengt, hat typischerweise noch keinen PR — liefe der pr-check
+//     zuerst, würde aus einem sauberen budgetExceeded ein technischer Fehler.
+test('pr-check: Budget-Abbruch nach dem Build spart die Station und nennt keine PR-Nummer', async () => {
+  const state = { tokens: 0 }
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } } }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => { if (c.label === 'build #1') state.tokens += 5000 },
+  })
+  assert.equal(doneOf(report, 1).budgetExceeded, true)
+  none(calls, /^pr-check /)
+  const abort = only(calls, 'budget-abort #1')
+  assert.ok(/Stand: nach Build\./.test(abort.prompt), 'der Stand-Text lautet schlicht "nach Build"')
+  assert.ok(!/PR #\d+ offen/.test(abort.prompt),
+    'die (unverifizierte) PR-Nummer des Builders gehört nicht in den Abbruchkommentar — der Prompt ermittelt sie selbst per gh')
+  assert.equal(report.stopped, null)
+})
+
+// ---------------------------------------------------------------------------
+// Fortschritts-Circuit-Breaker (Issue #31)
+// ---------------------------------------------------------------------------
+
+// 16. needs-human stoppt einzeln nie den Lauf — eine SERIE schon.
+test('Circuit-Breaker: drei Einheiten in Folge ohne Merge halten den Lauf an', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg(),
+    respond: (c) => (/^ac-verify/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  assert.ok(report.stopped, 'der Lauf muss anhalten')
+  assert.equal(report.stopped.issue, 3)
+  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.deepEqual(report.remaining, [4])
+  none(calls, /#4\b/)
+  assert.equal(report.done.length, 3)
+  assert.ok(logs.some((l) => /ohne Fortschritt/.test(l)), 'LOG zum Breaker fehlt')
+})
+
+// 17. Reset-Semantik: ein Merge dazwischen setzt den Zähler zurück — dass #4 und
+//     #5 überhaupt noch anlaufen, ist nur damit erklärbar.
+test('Circuit-Breaker: ein Merge setzt den Zähler zurück', async () => {
+  const fails = new Set([1, 2, 4, 5, 6])
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4), unit(5), unit(6), unit(7)],
+    config: cfg(),
+    respond: (c) => {
+      const m = /^ac-verify(\+\d+)? #(\d+)$/.exec(c.label)
+      if (m && fails.has(Number(m[2]))) return { pass: false, unmet: ['AC offen'] }
+      return undefined
+    },
+  })
+  assert.equal(doneOf(report, 3).pr, 103, 'der Merge dazwischen')
+  assert.equal(doneOf(report, 4).needsHuman, true, 'ohne Reset hätte der Breaker schon bei #4 gefeuert')
+  assert.equal(doneOf(report, 5).needsHuman, true)
+  assert.equal(report.stopped.issue, 6)
+  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.deepEqual(report.remaining, [7])
+  none(calls, /#7\b/)
+})
+
+// 18. Der auslösende Vorfall: technische Fehler hängen die Einheit ans
+//     QUEUE-ENDE, die alte Doppelfehler-Regel greift bei langen Queues also erst
+//     nach einem kompletten Durchlauf. Der Breaker fängt das vorher ab.
+test('Circuit-Breaker: reihenweise technische Fehler stoppen, statt die Queue leerzubrennen', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg(),
+    respond: (c) => { if (/^build /.test(c.label)) throw new Error('Bash-Classifier nicht verfügbar') },
+  })
+  assert.equal(find(calls, 'build #1').length, 1, 'kein zweiter Anlauf mehr — der Breaker greift vorher')
+  none(calls, /#4\b/)
+  assert.equal(report.stopped.issue, 3)
+  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.deepEqual(report.failed, [], 'kein zweiter Fehler derselben Einheit — nichts ist endgültig gescheitert')
+  assert.deepEqual(report.remaining, [4, 1, 2, 3], 'die requeuten Einheiten stehen hinten in der Queue')
+})
+
+// 19. Fehlkonfiguration darf den Breaker nicht STILL abschalten (ein String wie
+//     "3" ergäbe in noProgress >= "3" ein anderes Verhalten).
+test('progressStopAfter: unbrauchbarer Wert bricht ab statt still zu deaktivieren', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ progressStopAfter: 'drei' }) }),
+    /progressStopAfter muss eine ganze Zahl/,
+  )
+})
+
+// 20. Zusage "0 schaltet den Breaker ab" — geprüft als PAAR gegen denselben
+//     Ablauf mit Default 3. Ohne die Gegenprobe wäre der 0-Fall vakuum-grün
+//     (ein Runner ganz ohne Breaker stoppt auch nie).
+test('progressStopAfter: 0 schaltet den Breaker ab (Paarprobe gegen Default 3)', async () => {
+  const scenario = (over) => runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg(over),
+    respond: (c) => (/^ac-verify/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const off = await scenario({ progressStopAfter: 0 })
+  assert.equal(off.report.stopped, null, 'progressStopAfter: 0 darf nie stoppen')
+  assert.equal(off.report.done.length, 4)
+  assert.ok(off.report.done.every((d) => d.needsHuman === true))
+  assert.deepEqual(off.report.remaining, [])
+  assert.equal(find(off.calls, 'needs-human #4').length, 1, 'auch die vierte Einheit muss noch anlaufen')
+
+  const on = await scenario({})
+  assert.ok(on.report.stopped && /Fortschritts-Circuit-Breaker/.test(on.report.stopped.reason),
+    'derselbe Ablauf MUSS mit dem Default 3 stoppen — sonst beweist der 0-Fall nichts')
+  assert.deepEqual(on.report.remaining, [4])
+})
+
+// ---------------------------------------------------------------------------
+// Allowlist-taugliche Quotierung der Plugin-Script-Pfade (Issue #31)
+// ---------------------------------------------------------------------------
+
+// 21. Bash-Permission-Regeln sind PRÄFIX-Muster: ein Kommando, das mit `bash "`
+//     beginnt, passt auf kein `Bash(bash <pluginRoot>/scripts/*)`. Normale Pfade
+//     gehen deshalb unquoted raus — Pfade mit Leerzeichen weiterhin quoted.
+test('Cleanup-Aufruf passt auf das Allowlist-Präfix (unquoted normal, quoted nur mit Leerzeichen)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1), unit(2)],
+    config: cfg(),
+    pluginRoot: '/opt/plugins/flowkit',
+    respond: (c) => (/^ac-verify(\+\d+)? #2$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const post = only(calls, 'cleanup #1').prompt
+  const nh = only(calls, 'needs-human #2').prompt
+  assert.ok(post.includes('bash /opt/plugins/flowkit/scripts/cleanup-worktrees.sh --branch feat/1-x'),
+    'der Post-Merge-Cleanup muss das Script unquoted aufrufen')
+  assert.ok(nh.includes('bash /opt/plugins/flowkit/scripts/cleanup-worktrees.sh --issue 2'),
+    'der needs-human-Cleanup muss das Script unquoted aufrufen')
+  assert.ok(!/bash "\/opt\/plugins/.test(post) && !/bash "\/opt\/plugins/.test(nh),
+    'ein führendes Anführungszeichen macht jede Präfix-Regel wirkungslos')
+
+  // Gegenprobe: die naive Umsetzung (Quotes einfach entfernen) zerlegte einen
+  // Pfad mit Leerzeichen in zwei Argumente.
+  const spaced = await runWorkflow({ units: [unit(1)], config: cfg(), pluginRoot: '/opt/my plugins/flowkit' })
+  assert.ok(only(spaced.calls, 'cleanup #1').prompt.includes('bash "/opt/my plugins/flowkit/scripts/cleanup-worktrees.sh" --branch'),
+    'Pfade mit Leerzeichen müssen weiterhin gequotet werden')
 })
 
 // ---------------------------------------------------------------------------

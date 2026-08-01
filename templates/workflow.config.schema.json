@@ -197,6 +197,12 @@
       "type": "integer",
       "default": 3
     },
+    "progressStopAfter": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Fortschritts-Circuit-Breaker: nach so vielen abgeschlossenen Einheiten IN FOLGE ohne Merge (needs-human, Budget-Abbruch oder technischer Fehler) hält der Lauf an und nennt den Grund im Bericht. Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück; blockierte Einheiten zählen nicht mit. 0 schaltet den Breaker ab."
+    },
     "mergeCheck": {
       "type": "string",
       "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün"

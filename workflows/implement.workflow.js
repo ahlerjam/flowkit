@@ -97,6 +97,15 @@ const RUN_FACTOR = C.runBudgetFactor === undefined ? 1.2 : C.runBudgetFactor
 if (typeof RUN_FACTOR !== 'number' || !(RUN_FACTOR > 0) || !Number.isFinite(RUN_FACTOR)) {
   throw new Error(`flowkit: runBudgetFactor muss eine positive Zahl sein (ist ${JSON.stringify(C.runBudgetFactor)}) — ein ungültiger Wert ergäbe NaN als Lauf-Deckel und würde ihn still abschalten.`)
 }
+// Fortschritts-Circuit-Breaker (Issue #31): ein Lauf, der 23 Einheiten
+// durchreicht, ohne einen einzigen PR zu erzeugen, soll nicht bis zum Ende
+// brennen. Gezählt werden abgeschlossene Einheiten OHNE Merge IN FOLGE
+// (needs-human, Budget-Abbruch, technischer Fehler); ein Merge oder eine
+// gh-verifizierte Erledigung setzt zurück. 0 schaltet den Breaker ab.
+const PROGRESS_STOP = C.progressStopAfter === undefined ? 3 : C.progressStopAfter
+if (!Number.isInteger(PROGRESS_STOP) || PROGRESS_STOP < 0) {
+  throw new Error(`flowkit: progressStopAfter muss eine ganze Zahl >= 0 sein (ist ${JSON.stringify(C.progressStopAfter)}) — ein ungültiger Wert würde den Fortschritts-Circuit-Breaker still abschalten (ein String wie "3" ergäbe in noProgress >= "3" ein anderes Verhalten).`)
+}
 // Lauf-Gesamtdeckel: Summe der Einheiten-Budgets dieses Laufs, mal Reserve-Faktor.
 const runCap = Math.round(units.reduce((s, u) => s + budgetFor(u).tokens, 0) * RUN_FACTOR)
 const runStart = HAS_BUDGET ? budget.spent() : 0
@@ -146,8 +155,16 @@ const PRE = `Lies ZUERST AGENTS.md im Repo-Root — Konventionen und rote Linien
 // nur noch aus. Ohne pluginRoot (alter Skill-Aufrufer) greift die Prompt-Regel.
 const ROOT = typeof A.pluginRoot === 'string' && A.pluginRoot ? A.pluginRoot.replace(/\/+$/, '') : null
 const CLEANUP_SH = ROOT ? `${ROOT}/scripts/cleanup-worktrees.sh` : null
+// Allowlist statt Permission-Classifier (Issue #31): /flowkit:setup trägt die
+// Plugin-Script-Pfade als PRÄFIX-Muster in permissions.allow ein
+// (`Bash(bash <pluginRoot>/scripts/*)`). Ein gequoteter Pfad ergibt ein Kommando,
+// das mit `bash "` beginnt und damit auf kein solches Muster passt — genau dieser
+// Aufruf landete beim ausgefallenen Classifier und kippte einen ganzen Lauf.
+// Deshalb quoten wir nur noch, wenn der Pfad es wirklich braucht; dieser Randfall
+// (Leerzeichen/Sonderzeichen im Plugin-Pfad) fällt sichtbar und selten zurück.
+const shArg = (p) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(p) ? p : `"${p}"`)
 const wtCleanup = (n) => CLEANUP_SH
-  ? `Worktree-Cleanup NUR für Issue #${n}: führe aus: bash "${CLEANUP_SH}" --issue ${n} — das Script entfernt deterministisch ausschließlich Worktrees, deren Branch die Issue-Nummer ${n} als eigenes (durch Nicht-Ziffern begrenztes) Segment trägt; Haupt-Tree, detached und fremde Worktrees fasst es nie an. KEINE eigenen git worktree remove/prune-Aufrufe zusätzlich. Meldet das Script "nichts zu entfernen", ist das das korrekte Ergebnis.`
+  ? `Worktree-Cleanup NUR für Issue #${n}: führe aus: bash ${shArg(CLEANUP_SH)} --issue ${n} — das Script entfernt deterministisch ausschließlich Worktrees, deren Branch die Issue-Nummer ${n} als eigenes (durch Nicht-Ziffern begrenztes) Segment trägt; Haupt-Tree, detached und fremde Worktrees fasst es nie an. KEINE eigenen git worktree remove/prune-Aufrufe zusätzlich. Meldet das Script "nichts zu entfernen", ist das das korrekte Ergebnis.`
   : `Worktree-Cleanup NUR für Issue #${n}: \`git worktree list --porcelain\` lesen und ausschließlich Worktrees entfernen, deren ausgecheckter Branch die Issue-Nummer ${n} als eigenes Segment im Branchnamen trägt. Worktrees anderer Issues, Worktrees anderer Läufe und den Haupt-Tree NIEMALS anfassen — auch dann nicht, wenn sie verwaist, leer oder alt aussehen: parallel laufende Einheiten arbeiten darin. Kein Aufräumen nach Pfadmuster, kein \`git worktree prune\`. Bleibt nach dieser Regel nichts übrig, ist das das korrekte Ergebnis.`
 
 const PR_SCHEMA = {
@@ -189,6 +206,25 @@ const GATE_SCHEMA = {
   type: 'object', required: ['merged', 'postMergeGreen'], additionalProperties: false,
   properties: { merged: { type: 'boolean' }, postMergeGreen: { type: 'boolean', description: 'false = main-CI oder Smoke nach dem Merge rot; onSmokeFailure-Policy wurde ausgeführt' }, note: { type: 'string' } },
 }
+// Weltzustand statt Agent-Prosa (Issue #31, löst #33): der Builder-Return ist
+// eine BEHAUPTUNG. Fällt der Bash-Permission-Classifier aus, endet der Agent
+// REGULÄR mit Prosa und liefert schema-konform pr:0 bzw. skipped:true — bis
+// 0.7.0 verbuchte der Runner das als Erfolg. Diese Station fragt GitHub und
+// liefert die einzige PR-Nummer, mit der weitergearbeitet wird. `found` und `pr`
+// getrennt zu führen macht "kein PR" mechanisch prüfbar, statt es aus Prosa zu
+// raten; `state` trennt "schon gemergt" von "gibt keinen PR". `enum` steht
+// bewusst NEBEN `type` — kein anderes Schema dieser Datei nutzt bares enum, die
+// Engine-Toleranz dafür ist unverifiziert.
+const PRCHECK_SCHEMA = {
+  type: 'object', required: ['found', 'pr', 'branch', 'state'], additionalProperties: false,
+  properties: {
+    found: { type: 'boolean', description: 'true nur, wenn gh genau einen verwertbaren PR mit exakt "Closes #<n>" im Body geliefert hat' },
+    pr: { type: 'integer', description: 'PR-Nummer laut gh; 0 wenn found=false' },
+    branch: { type: 'string', description: 'headRefName laut gh; leer wenn found=false' },
+    state: { type: 'string', enum: ['OPEN', 'MERGED', 'CLOSED', 'NONE'], description: 'PR-Zustand laut gh; NONE wenn kein PR' },
+    note: { type: 'string' },
+  },
+}
 const PREFLIGHT_SCHEMA = {
   type: 'object', required: ['clean'], additionalProperties: false,
   properties: { clean: { type: 'boolean' }, note: { type: 'string' } },
@@ -213,6 +249,16 @@ ${learnStep(u)}2. Idempotenz: gh pr list -R ${SLUG} --search "Closes #${n}" --st
 4. Lokale Gates (alle müssen grün sein): ${gateCmds}
 5. Skill superpowers:verification-before-completion laden und befolgen (Beweis vor Behauptung). Dann ${PUSH}. gh pr create -R ${SLUG} mit "Closes #${n}" im Body. Existiert ein Plan-Kommentar ${MARK.plan}: dessen Task-Checkliste als Abschnitt "### Tasks" in den PR-Body übernehmen — von dir erledigte Punkte als "- [x]", offene/übersprungene als "- [ ]" (bewusst Übersprungenes mit kurzem Grund dahinter); ohne Plan-Kommentar entfällt der Abschnitt ersatzlos. NICHT mergen, NICHT auf Reviews warten.
 Return: { pr, branch, skipped: false }.`
+
+// Die Station bekommt bewusst KEINE Behauptung der Bau-Station übergeben: mit
+// claimedPr/claimedBranch im Prompt wäre nicht mehr unterscheidbar, ob sie gh
+// wirklich gefragt oder nur nachgeplappert hat — sie soll ja genau das prüfen.
+const prCheckPrompt = (n) => `${PRE}Du bist die PR-CHECK-Station für Issue #${n}. Du stellst NUR den Weltzustand auf GitHub fest und meldest ihn — kein Code, kein Push, kein Kommentar, kein Merge, keine Label-Änderung.
+1. gh pr list -R ${SLUG} --search "Closes #${n}" --state all --json number,state,body,headRefName
+2. Jeden Treffer am Body verifizieren: er muss die Zeichenfolge "Closes #${n}" enthalten, rechts durch eine Nicht-Ziffer begrenzt (die Volltextsuche liefert auch #${n}XX-Nummern). Bleibt kein Treffer übrig: found=false, pr=0, branch="", state="NONE".
+3. Priorität unter den verifizierten Treffern: OPEN vor MERGED vor CLOSED — ein frisch gebauter OFFENER PR schlägt einen alten gemergten, sonst bliebe er verwaist liegen. Bei Gleichstand die höchste Nummer. Mehrere verifizierte OFFENE Treffer sind MEHRDEUTIG: found=false, pr=0, branch="", state="NONE", note "mehrdeutig: #a, #b" — welcher gemergt werden soll, ist nicht zu raten.
+4. Kannst du gh nicht ausführen (Tool-Recht fehlt, Kommando bricht ab, Ausgabe unlesbar), ist das KEIN "es gibt keinen PR": found=false, pr=0, branch="", state="NONE" und den Fehlertext WÖRTLICH in note. Eine PR-Nummer NIE raten und NIE aus dem Kontext übernehmen — es zählt ausschließlich, was gh ausgegeben hat.
+Return { found, pr, branch, state, note }.`
 
 const verifyPrompt = (n, pr, u, round) => `${PRE}Du bist der AC-VERIFIER: frischer Kontext, unabhängig vom Implementer. Dein Input ist AUSSCHLIESSLICH: (a) gh issue view ${n} -R ${SLUG} --json title,body und (b) der PR: gh pr view ${pr} -R ${SLUG} und gh pr diff ${pr} -R ${SLUG}.
 Auftrag: WIDERLEGE, dass die Umsetzung jedes Akzeptanzkriterium erfüllt. Pro AC: Urteil erfüllt/verfehlt plus konkreter Beleg (Diff-Stelle, beweisender Test, oder eigenes Nachstellen: eigenen Worktree anlegen mit git fetch origin und git worktree add <tmp-pfad> origin/<pr-branch>, ${SETUP ? `dort zuerst ${SETUP}, dann ` : 'dort '}Tests gezielt ausführen, danach git worktree remove — NIE den Haupt-Tree anfassen, NIE checkout -B).
@@ -292,9 +338,52 @@ const runUnit = async (u) => {
 
   const built = await agent(buildPrompt(n, u), { label: `build #${n}`, phase: 'Implement', model: modelFor('builder', u, false), isolation: 'worktree', schema: PR_SCHEMA })
   if (!built) throw new Error('Builder lieferte kein Ergebnis (Agent-Abbruch)')
-  if (built.skipped) return { skipped: true, note: built.note || '' }
-  const pr = built.pr
-  if (over()) return budgetStop(`nach Build (PR #${pr} offen)`)
+  // Budgetcheck ZUERST, PR-Check danach (Issue #31/#33): ein Builder, der sein
+  // Budget sprengt, hat typischerweise noch gar keinen PR. Liefe die Station
+  // vorher, würde aus einem sauberen budgetExceeded ein technischer Fehler samt
+  // Requeue und Lauf-Stop. Die PR-Nummer im Stand-Text entfällt dafür ersatzlos —
+  // der Budget-Abbruch ermittelt sie ohnehin selbst per gh pr list.
+  if (over()) return budgetStop('nach Build')
+  // Weltzustands-Verifikation (Issue #31, löst #33): ab hier zählt nur, was gh
+  // sagt. Fällt der Bash-Permission-Classifier aus, endet der Builder REGULÄR
+  // mit Prosa und schema-konformem pr:0 bzw. skipped:true — ohne diese Station
+  // liefe die Einheit mit "PR #0" weiter (Befund #33) oder zählte als
+  // Erledigung. Die PR-Nummer kommt deshalb IMMER von hier, nie aus dem
+  // Builder-Return; kein PR heißt: die Bau-Station hat nicht geliefert
+  // (technischer Fehler, kein inhaltliches needs-human).
+  let seen
+  try {
+    seen = await agent(prCheckPrompt(n), { label: `pr-check #${n}`, phase: 'Implement', model: 'haiku', schema: PRCHECK_SCHEMA })
+  } catch (e) {
+    // Eigener Fehlertext statt des durchgereichten Agent-Wurfs: gleiche Folge
+    // (technischer Fehler, Requeue), aber im Bericht von "gh weist keinen PR
+    // aus" unterscheidbar. Den bereits gebauten PR holt der Requeue-Builder über
+    // seinen Idempotenz-Schritt (gh pr list --state all) zurück.
+    throw new Error(`PR-Check-Station ausgefallen: ${e && e.message ? e.message : String(e)}`)
+  }
+  // Gültig ist ein Befund nur vollständig: ein leerer Branchname baute in den
+  // Fix- und Gate-Stationen ein `git worktree add <tmp>` ohne Argument.
+  const prOk = !!seen && seen.found === true && Number.isInteger(seen.pr) && seen.pr > 0 && typeof seen.branch === 'string' && !!seen.branch
+  if (built.skipped === true) {
+    if (!prOk || seen.state !== 'MERGED') {
+      throw new Error(`Builder meldete "skipped", gh weist zu Issue #${n} aber keinen gemergten PR aus (${(seen && seen.note) || 'kein Treffer'}) — nicht als erledigt verbucht`)
+    }
+    return { skipped: true, pr: seen.pr, note: built.note || seen.note || '' }
+  }
+  if (!prOk) {
+    throw new Error(`Kein PR zu Issue #${n} auf GitHub nachweisbar (Builder meldete pr=${JSON.stringify(built.pr)}, gh-Befund: ${(seen && seen.note) || 'kein Treffer'}) — die Bau-Station hat nicht geliefert`)
+  }
+  if (seen.state === 'MERGED') {
+    // Gebaut, aber laut gh schon gemergt (fremder Merge dazwischen, Doppelarbeit):
+    // ein zweiter Merge-Versuch auf einem gemergten PR scheitert garantiert.
+    LOG(`#${n} laut gh bereits gemergt (PR #${seen.pr}) — Einheit endet ohne Merge-Versuch.`)
+    return { skipped: true, pr: seen.pr, note: seen.note || `PR #${seen.pr} war bereits gemergt` }
+  }
+  if (seen.state !== 'OPEN') {
+    throw new Error(`PR #${seen.pr} zu Issue #${n} ist ${seen.state}, nicht OPEN — auf einem geschlossenen PR wird nicht weitergearbeitet`)
+  }
+  const pr = seen.pr
+  const prBranch = seen.branch
 
   let verdict = await agent(verifyPrompt(n, pr, u, 0), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   while (verdict && verdict.pass !== true && fixRounds < MAXFIX) {
@@ -303,7 +392,7 @@ const runUnit = async (u) => {
     // Das vorherige verdict-Objekt wandert in die Fix-Runde (Issue #8): der Fixer
     // kennt so die bereits erfüllten ACs und darf sie nicht kippen; der nächste
     // Verifier-Lauf (round > 0) diff't gegen den JSON-Block des Vorgängers.
-    await agent(fixPrompt(n, pr, built.branch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+    await agent(fixPrompt(n, pr, prBranch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
     verdict = await agent(verifyPrompt(n, pr, u, fixRounds), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   }
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
@@ -315,7 +404,7 @@ const runUnit = async (u) => {
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, built.branch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+      await agent(fixPrompt(n, pr, prBranch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
@@ -328,9 +417,9 @@ const runUnit = async (u) => {
   // gemergt wird ausschließlich innerhalb von withMergeLock.
   // Gate-Stationen auf haiku (Token-Sparen, 2026-07-31): Warten, Merge-Kommandos
   // und gh-Verifikation sind mechanisch — die inhaltliche Prüfung ist längst gelaufen.
-  const wait = await agent(gateWaitPrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
+  const wait = await agent(gateWaitPrompt(n, pr, prBranch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
   if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'}`)
-  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, built.branch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
+  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
   if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
 
   // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
@@ -338,7 +427,7 @@ const runUnit = async (u) => {
   // Feature-Branch liegen (Drift-Quelle). Best-effort, außerhalb des Merge-Locks;
   // darf den Einheit-Erfolg nie kippen.
   try {
-    await agent(`${PRE}POST-MERGE-CLEANUP für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert, Remote-Branch bereits gelöscht). NUR aufräumen, nichts implementieren: 1. ${CLEANUP_SH ? `bash "${CLEANUP_SH}" --branch ${built.branch} (entfernt deterministisch nur Worktrees mit exakt diesem Branch; keine eigenen worktree-remove/prune-Aufrufe zusätzlich)` : `git worktree list — jeden Worktree, dessen Branch ${built.branch} ist, mit git worktree remove --force entfernen`}. 2. git branch -D ${built.branch} (existiert er nicht mehr, ok).${CLEANUP_SH ? '' : ' 3. git worktree prune.'} Haupt-Tree (${BRANCH}) und fremde Worktrees/Branches NICHT anfassen.`,
+    await agent(`${PRE}POST-MERGE-CLEANUP für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert, Remote-Branch bereits gelöscht). NUR aufräumen, nichts implementieren: 1. ${CLEANUP_SH ? `bash ${shArg(CLEANUP_SH)} --branch ${prBranch} (entfernt deterministisch nur Worktrees mit exakt diesem Branch; keine eigenen worktree-remove/prune-Aufrufe zusätzlich)` : `git worktree list — jeden Worktree, dessen Branch ${prBranch} ist, mit git worktree remove --force entfernen`}. 2. git branch -D ${prBranch} (existiert er nicht mehr, ok).${CLEANUP_SH ? '' : ' 3. git worktree prune.'} Haupt-Tree (${BRANCH}) und fremde Worktrees/Branches NICHT anfassen.`,
       { label: `cleanup #${n}`, phase: 'Implement', model: 'haiku' })
   } catch (e) {
     LOG(`#${n} Post-Merge-Cleanup übersprungen: ${e && e.message ? e.message : String(e)}`)
@@ -447,6 +536,27 @@ const needsHumanStop = async (u, reason) => {
     { label: `needs-human #${u.n}`, phase: 'Implement', model: 'haiku' })
 }
 
+// Fortschritts-Circuit-Breaker (Issue #31): der auslösende Lauf startete 23
+// Einheiten und erzeugte keinen einzigen PR. Jede Einheit scheiterte für sich
+// (needs-human bzw. erster technischer Fehler), keine Regel griff über Einheiten
+// HINWEG — und weil ein technischer Fehler die Einheit ans QUEUE-ENDE hängt
+// (queue.push), käme der zweite Versuch derselben Einheit erst nach allen
+// anderen. Deshalb ein laufweiter Zähler: nur ein Merge oder eine gh-verifizierte
+// Erledigung setzt ihn zurück. Blockierte Einheiten zählen nicht — sie laufen nie
+// an und kosten nichts. Der !stopped-Guard lässt einen bereits gesetzten
+// Stop-Grund (Post-Merge rot, zweiter technischer Fehler) gewinnen; Lesen und
+// Schreiben von noProgress passieren synchron ohne dazwischenliegendes await,
+// damit ist der Zähler auch bei parallelen Workern konsistent.
+let noProgress = 0
+const noteOutcome = (progressed, u, why) => {
+  if (progressed) { noProgress = 0; return }
+  noProgress += 1
+  if (PROGRESS_STOP > 0 && noProgress >= PROGRESS_STOP && !stopped) {
+    stopped = { issue: u.n, reason: `Fortschritts-Circuit-Breaker: ${noProgress} Einheit(en) in Folge ohne Merge (progressStopAfter=${PROGRESS_STOP}), zuletzt #${u.n}: ${why}` }
+    LOG(`STOP: ${noProgress} Einheiten in Folge ohne Fortschritt (kein PR, kein Merge) — der Lauf hält an, statt die Queue leerzubrennen.`)
+  }
+}
+
 // Cleanup im Fehlerpfad (Spec §8: Cleanup ist Teil JEDER Abbruch-Routine).
 const cleanupUnit = async (u, reason) => {
   await agent(`${PRE}CLEANUP nach technischem Fehler für Issue #${u.n} (${reason}). NUR aufräumen, nichts implementieren: ${wtCleanup(u.n)} Zurückgelassene lokale Branches DIESES Issues OHNE offenen PR mit git branch -D löschen. Offene PRs und Remote-Branches mit offenem PR NICHT anfassen.`,
@@ -469,6 +579,10 @@ const worker = async () => {
       if (res.budgetExceeded) unresolved.add(u.n)
       else doneOk.add(u.n)
       LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
+      // Ein Merge und eine gh-verifizierte Erledigung setzen den Zähler zurück,
+      // ein Budget-Abbruch zählt hoch: er hat Tokens verbrannt, aber nichts
+      // gemergt. Drei davon in Folge heißen "die Budgets sind falsch kalibriert".
+      noteOutcome(!res.budgetExceeded, u, `Budget-Abbruch ohne Merge: ${res.note || ''}`)
       if (res.postMergeRed) {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
         LOG(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
@@ -488,6 +602,9 @@ const worker = async () => {
         unresolved.add(u.n)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
         LOG(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
+        // needs-human bleibt ein Einheit-Stopp, der den Lauf einzeln nie anhält —
+        // aber eine SERIE davon ist genau das Muster, das der Breaker abfängt.
+        noteOutcome(false, u, msg)
       } else {
         failures[u.n] = (failures[u.n] || 0) + 1
         LOG(`#${u.n} technischer Fehler (Versuch ${failures[u.n]}): ${msg}`)
@@ -504,6 +621,10 @@ const worker = async () => {
         } else {
           queue.push(u)
         }
+        // NACH dem Requeue/Stop-Block: die bestehende Buchführung bleibt
+        // unverändert, und der !stopped-Guard lässt einen schon gesetzten
+        // Stop-Grund (zweiter Fehler derselben Einheit) gewinnen.
+        noteOutcome(false, u, msg)
       }
     } finally {
       if (u.area) inFlightAreas.delete(u.area)
