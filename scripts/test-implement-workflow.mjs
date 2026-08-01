@@ -583,6 +583,21 @@ test('pr-check: Budget-Abbruch nach dem Build spart die Station und nennt keine 
   assert.equal(report.stopped, null)
 })
 
+// 15b. Härtung an der Quelle (Issue #33): die PR-Check-Station fängt ein
+//      geratenes/verlorenes pr:0 zwar ab, aber Schema-Beschreibung und
+//      Return-Zeile sollen den Builder erst gar nicht dazu einladen, 0 zu
+//      melden, wenn tatsächlich ein PR existiert.
+test('buildPrompt: Schema-Beschreibung und Return-Zeile verbieten geratenes pr:0', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const build = only(calls, 'build #1')
+  assert.equal(build.opts.schema.properties.pr.description, 'PR-Nummer, wie gh sie ausgegeben hat; 0 ausschließlich bei skipped=true',
+    'die Schema-Beschreibung muss 0 explizit an skipped=true koppeln, nicht als beliebigen Default lesbar sein')
+  assert.ok(/pr: 0 ist ausschließlich für skipped=true zulässig/.test(build.prompt),
+    'die Return-Zeile muss 0 explizit auf skipped=true beschränken')
+  assert.ok(/Nie raten, nie 0 melden/.test(build.prompt),
+    'die Return-Zeile muss dem Builder verbieten, die PR-Nummer zu raten')
+})
+
 // ---------------------------------------------------------------------------
 // Fortschritts-Circuit-Breaker (Issue #31)
 // ---------------------------------------------------------------------------

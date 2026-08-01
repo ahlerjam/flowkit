@@ -170,7 +170,7 @@ const wtCleanup = (n) => CLEANUP_SH
 const PR_SCHEMA = {
   type: 'object', required: ['pr', 'branch', 'skipped'], additionalProperties: false,
   properties: {
-    pr: { type: 'integer', description: 'PR-Nummer; 0 wenn skipped' },
+    pr: { type: 'integer', description: 'PR-Nummer, wie gh sie ausgegeben hat; 0 ausschließlich bei skipped=true' },
     branch: { type: 'string' },
     skipped: { type: 'boolean', description: 'true wenn Issue bereits erledigt' },
     note: { type: 'string' },
@@ -248,7 +248,7 @@ ${learnStep(u)}2. Idempotenz: gh pr list -R ${SLUG} --search "Closes #${n}" --st
 3. ${u.lane === 'quick' ? 'Quick-Lane: Skill superpowers:systematic-debugging laden; erst Repro-Test des Fehlers, dann minimaler Fix plus gezielter Regressionstest.' : 'Skill superpowers:test-driven-development laden. TDD: pro Akzeptanzkriterium failing Test zuerst, dann implementieren. Vertikaler Slice, Task-Checkliste des Plans abarbeiten.'}
 4. Lokale Gates (alle müssen grün sein): ${gateCmds}
 5. Skill superpowers:verification-before-completion laden und befolgen (Beweis vor Behauptung). Dann ${PUSH}. gh pr create -R ${SLUG} mit "Closes #${n}" im Body. Existiert ein Plan-Kommentar ${MARK.plan}: dessen Task-Checkliste als Abschnitt "### Tasks" in den PR-Body übernehmen — von dir erledigte Punkte als "- [x]", offene/übersprungene als "- [ ]" (bewusst Übersprungenes mit kurzem Grund dahinter); ohne Plan-Kommentar entfällt der Abschnitt ersatzlos. NICHT mergen, NICHT auf Reviews warten.
-Return: { pr, branch, skipped: false }.`
+Return: { pr, branch, skipped: false } — pr ist die Nummer, die gh für DIESEN PR ausgegeben hat (gh pr create druckt sie in der PR-URL; im Zweifel gh pr view --json number gegen den eigenen Branch gegenchecken), branch der eigene Branchname. Nie raten, nie 0 melden: pr: 0 ist ausschließlich für skipped=true zulässig — ein falscher Wert kostet die Einheit trotz der PR-Check-Station eine ganze Runde.`
 
 // Die Station bekommt bewusst KEINE Behauptung der Bau-Station übergeben: mit
 // claimedPr/claimedBranch im Prompt wäre nicht mehr unterscheidbar, ob sie gh
