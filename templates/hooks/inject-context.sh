@@ -3,8 +3,9 @@
 #
 # Basis-Ausgabe: [repo] branch=X dirty-files=N
 # Zusatz (best effort): liegengebliebene flowkit-Arbeit — offene Issues mit
-# Label budget-exceeded oder needs-human, je Treffer mit zugehörigem offenem
-# PR (Body-Match "Closes #N"), plus einmalig der passende resume-Hinweis.
+# Label budget-exceeded, needs-human oder merge-blocked, je Treffer mit
+# zugehörigem offenem PR (Body-Match "Closes #N"), plus einmalig der passende
+# Hinweis (resume bzw. Merge von Hand).
 #
 # Harte Regeln: SessionStart darf NIE blocken und NIE einen Fehler ausgeben.
 # Jeder Fehlerpfad (kein gh, keine Auth, kein Netz, kein Repo-Slug, Timeout)
@@ -67,13 +68,13 @@ stranded_work() {
   # gh leitet den Repo-Slug aus dem Remote im Arbeitsverzeichnis ab.
   cd "$PROJ" 2>/dev/null || return 0
 
-  # Aufruf 1/2: offene Issues, lokal auf budget-exceeded ODER needs-human
-  # gefiltert; Ausgabe als TSV: nummer<TAB>labels<TAB>titel
+  # Aufruf 1/2: offene Issues, lokal auf budget-exceeded ODER needs-human ODER
+  # merge-blocked gefiltert; Ausgabe als TSV: nummer<TAB>labels<TAB>titel
   ISSUES="$(gh_call issue list --state open --limit 100 --json number,title,labels \
     --jq '.[] | [.labels[].name] as $l
-      | select(any($l[]; . == "budget-exceeded" or . == "needs-human"))
+      | select(any($l[]; . == "budget-exceeded" or . == "needs-human" or . == "merge-blocked"))
       | [(.number|tostring),
-         ($l | map(select(. == "budget-exceeded" or . == "needs-human")) | join("+")),
+         ($l | map(select(. == "budget-exceeded" or . == "needs-human" or . == "merge-blocked")) | join("+")),
          .title] | @tsv')" || return 0
   [ -n "$ISSUES" ] || return 0
 
@@ -86,9 +87,13 @@ stranded_work() {
 
   TAB="$(printf '\t')"
   found_budget=0
+  found_resume=0
+  found_mergeblocked=0
   while IFS="$TAB" read -r inum ilabels ititle; do
     [ -n "$inum" ] || continue
-    case "$ilabels" in *budget-exceeded*) found_budget=1 ;; esac
+    case "$ilabels" in *budget-exceeded*) found_budget=1; found_resume=1 ;; esac
+    case "$ilabels" in *needs-human*) found_resume=1 ;; esac
+    case "$ilabels" in *merge-blocked*) found_mergeblocked=1 ;; esac
     # Zugehörigen PR lokal matchen: "Closes #N" (auch close/closed) im
     # PR-Text, mit Wortgrenze, damit #12 nicht #123 trifft.
     prinfo=""
@@ -108,10 +113,19 @@ $ISSUES
 EOF
   # Einmaliger resume-Hinweis: `resume` deckt budget-exceeded ab; sind NUR
   # needs-human-Treffer da, braucht es `resume all` (vgl. skills/implement).
+  # Das frühere `else` ist zwingend ein `elif` geworden: mit merge-blocked gibt
+  # es einen dritten Treffertyp, für den `resume all` eine falsche und teure
+  # Empfehlung wäre (der PR ist fertig, ein Resume verifizierte ihn nur neu).
   if [ "$found_budget" = 1 ]; then
     echo "[flowkit] -> /flowkit:implement resume"
-  else
+  elif [ "$found_resume" = 1 ]; then
     echo "[flowkit] -> /flowkit:implement resume all"
+  fi
+  # merge-blocked ist NICHT resume-fähig: der PR ist grün und fertig, es fehlt
+  # nur die Merge-Freigabe. Kein resume-Modus greift ihn ohnehin — das Issue
+  # trägt weder budget-exceeded noch needs-human.
+  if [ "$found_mergeblocked" = 1 ]; then
+    echo "[flowkit] -> merge-blocked: PR ist grün — Merge nach Freigabe von Hand nachziehen (gh pr merge <PR> --squash --delete-branch)"
   fi
 }
 # Subshell + doppelte Absicherung: kein Fehlertext, kein Nicht-Null-Exit.

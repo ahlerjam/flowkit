@@ -90,6 +90,13 @@ einzelnen Einheit zurechenbar ist.
   `resume all` ist die explizite Operator-Zustimmung, es trotzdem erneut zu
   versuchen. Issues mit diesen Labels, aber OHNE offenen PR, gehören nicht in
   den Resume-Scope (nichts zum Aufsetzen) — sie im Abschlussbericht ausweisen.
+  `merge-blocked`-Issues erreicht KEIN resume-Modus, auch `all` nicht: sie tragen
+  weder `budget-exceeded` noch `needs-human`, der Filter oben sieht sie also gar
+  nicht. Das ist beabsichtigt — dort ist der PR fertig und grün, es fehlt nur die
+  Merge-Freigabe, ein Resume-Lauf würde ihn nur neu bauen und neu verifizieren.
+  Der Weg zurück führt über den Operator: von Hand mergen, oder das Label gegen
+  `agent-ready` tauschen (dann läuft die Einheit im nächsten Lauf regulär als
+  `next`-Kandidat mit). Im Abschlussbericht mit ihrer PR-Nummer ausweisen.
 - `max <X>` → harte Obergrenze der Einheiten für diesen Lauf.
 - `gaps <Bereich> [max X]` → flowkit:issue im gaps-Modus aufrufen, dann die neu
   angelegten `agent-ready`-Issues abarbeiten. Mit explizitem `max` vollautonom;
@@ -230,6 +237,20 @@ statt still ewig zu blockieren.
    wegen eines fremden Fehlers. Das Warten (10-Minuten-Cap) liegt im Lock —
    solange niemand sonst mergt, kann `cancel-in-progress` den eigenen Lauf
    nicht abbrechen. Ein Merge passiert NIE außerhalb des Locks.
+   Liefert die Merge-Station kein Ergebnis (die Harness kann sie anhalten —
+   `agent()` gibt dann null zurück) oder meldet sie `merged != true`, läuft
+   danach die **Merge-Diagnose**: eine read-only-Station (haiku), die den echten
+   PR-Zustand liest (`state`, `mergedAt`, Zahl grüner/roter/laufender Checks,
+   Zustand von CONFIG.mergeCheck) und NICHTS mergt — nur deshalb kann sie
+   denselben Block nicht erneut auslösen. Ihr Befund entscheidet, und zwar
+   deterministisch im Scheduler statt im Agenten: `mergedAt` gesetzt → die
+   Einheit gilt als gemergt, der Post-Merge-Beweis lief dann aber NICHT
+   (`postMerge: "unmeasured"` plus `postMergeUnverified: true` im Bericht — grün
+   wird nicht behauptet, niemand hat den Default-Branch gelesen); PR offen, kein
+   roter und kein laufender Check, Pflicht-Check grün → Zustand `merge-blocked`
+   (siehe Stop-Regeln); alles andere → `needs-human` mit dem gelesenen Zustand
+   als Grund. Fällt die Diagnose selbst aus, gilt `needs-human`. „kein Ergebnis"
+   landet nie mehr in Issue oder Bericht.
    Alle Fix-Runden aus 4.-6. zählen zusammen auf das EINE issue-globale
    CONFIG.maxFixRounds. Einzige Ausnahme: der CI-Infrastruktur-Re-Run aus
    Station 6 — er ändert keine Zeile Code und misst nur neu, also wäre eine
@@ -260,6 +281,22 @@ statt still ewig zu blockieren.
   Urteil braucht der Mensch, der übernimmt (#35). Der LAUF fährt mit dem
   nächsten Issue fort. Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2
   laufen Fixes genau eine Modellstufe höher (CONFIG.models.escalation).
+- **Extern blockierter Merge** (die Merge-Station lief nicht durch, der PR ist
+  laut gh aber offen, ohne roten und ohne laufenden Check und mit grünem
+  CONFIG.mergeCheck — etwa weil das Sicherheitssystem der Harness einen
+  unbeaufsichtigten Merge anhält): eigener Zustand, kein Fehlschlag. Label
+  `merge-blocked` auf Issue UND PR, Kommentar mit dem gelesenen Zustand an
+  beiden, der PR bleibt offen und ready (kein Draft, kein Schließen, kein
+  Branch-Löschen), Worktree-Cleanup läuft. Im Bericht trägt der `done`-Eintrag
+  `mergeBlocked: true`; die Einheit zählt NICHT als Erledigung, ihre Abhängigen
+  laufen also nicht an. Der LAUF fährt fort, aber der Zustand zählt als KEIN
+  Fortschritt für den Circuit-Breaker: eine Harness-seitige Blockade ist
+  systemisch, nicht PR-spezifisch — sitzt sie einmal, endet jede weitere Einheit
+  genauso, jede nach vollem Build und Gate. Ausweg für den Operator: den PR nach
+  Freigabe von Hand mergen (`gh pr merge <PR> --squash --delete-branch`) ODER am
+  Issue die Labels tauschen (`gh issue edit <N> --remove-label merge-blocked
+  --add-label agent-ready`), damit ein späterer Lauf die Einheit erneut aufnimmt.
+  Ein resume-Modus greift sie nicht (siehe Scope).
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall, ODER: nach dem Builder ist
   auf GitHub kein verwertbarer PR zum Issue nachweisbar — siehe Station 3):
   erster Fehler → Cleanup + Queue-Ende (transient); zweiter technischer Fehler
@@ -323,6 +360,14 @@ ungewohnt aus: die auslösende Einheit steht gleichzeitig in `stopped.issue` UND
 in `remaining` — sie wurde als transienter technischer Fehler requeued, bevor der
 Breaker den Lauf anhielt. `failed` bleibt dabei leer: endgültig gescheitert ist
 sie nicht, sie kommt im nächsten Lauf unverändert wieder dran.
+Nicht jede Nicht-Erledigung hinterlässt eine Spur auf GitHub: `needs-human`,
+`budget-exceeded` und `merge-blocked` setzen Label und Kommentar an Issue und PR
+— die dritte Klasse, „Einheit hat nichts geliefert" (technischer Fehler, allen
+voran ein Builder ohne per gh nachweisbaren PR), setzt bewusst KEINS von beidem:
+ein Label für einen Zustand, in dem gar kein PR existiert, hätte keinen Träger.
+Diese Einheiten stehen ausschließlich im Lauf-Bericht (`failed` bzw.
+`stopped.reason`, mit dem gh-Befund im Wortlaut) und im Log. Wer morgens nur auf
+die GitHub-Queues schaut, sieht sie nicht — dafür ist der Bericht da.
 Nach JEDEM Lauf-Ende den Lauf-Bericht persistieren:
 `.flowkit/runs/<YYYY-MM-DDTHH-MM>-<scope>.json` — Inhalt: das Return-Objekt des
 Workflows plus `scope` (der aufgelöste Auftrag) und `startedAt`. `.flowkit/` ist

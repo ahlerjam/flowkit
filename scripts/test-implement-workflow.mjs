@@ -8,7 +8,8 @@
 // CI-Infrastruktur-Re-Run im Gate-Wait (Diagnose vor Fix-Runde),
 // Allowlist-taugliche Quotierung der Plugin-Script-Pfade,
 // Abbruchpfade ohne Draft (Label + Abbruchkommentar am PR statt
-// gh pr ready --undo) und der Merge-Guard gegen Abbruch-Labels) mit
+// gh pr ready --undo), der Merge-Guard gegen Abbruch-Labels sowie
+// Merge-Diagnose und der Zustand merge-blocked) mit
 // gemocktem agent(). Nur Node-Stdlib. Aufruf: node scripts/test-implement-workflow.mjs
 //
 // Harness: die Engine stellt dem Workflow-Script Globals bereit (args, log,
@@ -51,6 +52,11 @@ const defaultResponse = (label) => {
   if (/^security/.test(label)) return { blockers: [] }
   if (/^gate-wait /.test(label)) return { green: true }
   if (/^gate-merge /.test(label)) return { merged: true, postMerge: 'green' }
+  // Bildet den realen Hauptfall aus Issue #37 ab (PR offen, grün und fertig, der
+  // Merge lief nicht). Ohne diesen Default liefe ein Test, der nur gate-merge
+  // manipuliert, mit einem leeren {} weiter und schriebe undefined in den
+  // Zustandstext.
+  if (/^merge-diag /.test(label)) return { prState: 'OPEN', merged: false, checksGreen: 1, checksRed: 0, checksPending: 0, mergeCheckState: 'SUCCESS', note: 'Merge nicht ausgeführt' }
   return {} // plan, fix*, cleanup, needs-human, budget-abort: Ergebnis ungenutzt
 }
 
@@ -1141,6 +1147,263 @@ test('Merge-Station: Abbruch-Labels am PR blocken den Merge', async () => {
   assert.ok(/kein needs-human- und kein budget-exceeded-Label auf dem PR/.test(p), 'Merge-Guard fehlt')
   assert.ok(/gh pr view 101 -R acme\/demo --json labels/.test(p), 'die Prüfung muss den Live-Zustand des PR lesen, nicht Prosa glauben')
   assert.ok(/Abbruch-Signal[\s\S]{0,200}GATE:/.test(p), 'ein gefundenes Abbruch-Label muss zum GATE-Fehler führen, nicht zum Merge')
+})
+
+// ---------------------------------------------------------------------------
+// Merge-Diagnose und der Zustand merge-blocked (Issue #37)
+// ---------------------------------------------------------------------------
+
+// 40. Der Hauptfall des Issues: die Harness hält die Merge-Station an, agent()
+//     liefert null. Bis 0.7.0 stand daraufhin "kein Ergebnis" im Issue — ohne
+//     jede Aussage darüber, ob der PR grün und fertig oder rot ist.
+test('Merge extern blockiert: gate-merge ohne Ergebnis + grüner PR → merge-blocked', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1), unit(2)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return null
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'OPEN', merged: false, checksGreen: 19, checksRed: 0, checksPending: 0, mergeCheckState: 'SUCCESS', note: 'coordinator SUCCESS, Merge nicht ausgeführt' }
+      }
+      return undefined
+    },
+  })
+  const diag = only(calls, 'merge-diag #1')
+  assert.equal(diag.opts.model, 'haiku', 'die Diagnose ist eine Lese-Station — sie gehört auf das billigste Modell')
+  assert.ok(/KEIN gh pr merge/.test(diag.prompt), 'die Read-only-Eigenschaft muss im Prompt stehen, sonst löst die Diagnose denselben Block erneut aus')
+  assert.ok(!/gh pr merge 101/.test(diag.prompt), 'die Diagnose darf keinen Merge-Befehl mit PR-Nummer enthalten')
+  assert.ok(/gh pr view 101 -R acme\/demo --json number,state,mergedAt/.test(diag.prompt), 'mergedAt ist der einzige Beleg für "gemergt"')
+  assert.ok(/gh pr checks 101/.test(diag.prompt), 'die Check-Zählung fehlt')
+  const stop = only(calls, 'merge-blocked #1')
+  assert.ok(/--add-label merge-blocked/.test(stop.prompt), 'das Label ist das einzige Signal auf GitHub')
+  assert.ok(!/--undo/.test(stop.prompt), 'der PR darf auch hier nicht auf Draft zurückgesetzt werden')
+  assert.ok(!/gh pr merge 101/.test(stop.prompt), 'dieser Pfad mergt NICHTS — auch nicht als zitierter Befehl im Kommentartext')
+  none(calls, /^needs-human /)
+  none(calls, /^cleanup #1$/)
+  none(calls, /^learnings #1$/)
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.mergeBlocked, true)
+  assert.equal(d1.pr, 101)
+  assert.ok(!d1.needsHuman, 'ein blockierter Merge ist kein inhaltliches Scheitern')
+  assert.ok(/rot 0/.test(d1.note) && /coordinator/.test(d1.note), `der gelesene Zustand gehört in die note: ${d1.note}`)
+  assert.ok(!/kein Ergebnis/.test(d1.note), 'genau dieser Text war der Befund des Issues')
+  assert.equal(report.stopped, null, 'der LAUF fährt fort')
+  assert.deepEqual(report.failed, [])
+  assert.equal(doneOf(report, 2).pr, 102, 'die zweite Einheit muss regulär durchlaufen')
+  assert.ok(logs.some((l) => /extern merge-blockiert/.test(l)), 'der Bericht muss "extern blockiert" von "gescheitert" unterscheiden')
+})
+
+// 41. Ein merge-blockierter PR liegt NICHT auf dem Default-Branch — ein
+//     Abhängiger baute gegen Code, den es dort nicht gibt. Diskriminiert
+//     zugleich die Implementierung: wer den Zustand in doneOk statt unresolved
+//     bucht, gibt #2 frei und `blocked` bliebe leer.
+test('Merge extern blockiert: Abhängiger läuft nicht an', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => (c.label === 'gate-merge #1' ? null : undefined),
+  })
+  assert.equal(doneOf(report, 1).mergeBlocked, true)
+  assert.deepEqual(report.blocked, [{ n: 2, by: [1] }])
+  none(calls, / #2$/)
+  assert.equal(report.stopped, null)
+})
+
+// 42. Gegenprobe zur Fail-Safe-Richtung: rote Checks bleiben needs-human. Der
+//     neue Zustand darf ein inhaltliches Scheitern NICHT umdeuten.
+test('Merge-Diagnose: rote Checks → needs-human mit dem echten Zustand', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return { merged: false, postMerge: 'unmeasured', note: '' }
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'OPEN', merged: false, checksGreen: 12, checksRed: 3, checksPending: 0, mergeCheckState: 'FAILURE', note: 'rot: build, e2e, lint' }
+      }
+      return undefined
+    },
+  })
+  only(calls, 'merge-diag #1')
+  only(calls, 'needs-human #1')
+  none(calls, /^merge-blocked /)
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(!d1.mergeBlocked)
+  assert.ok(/rot 3/.test(d1.note) && /build, e2e, lint/.test(d1.note), `die note muss den gelesenen Zustand tragen: ${d1.note}`)
+  assert.ok(!/kein Ergebnis/.test(d1.note))
+})
+
+// 43. Der teuerste Altfall: die Harness hält den Agenten NACH dem `gh pr merge`
+//     an. Der PR ist gemergt, gate ist null — bis 0.7.0 galt die Einheit als
+//     gescheitert und riss ihre Abhängigen mit. Grün behauptet der Zweig
+//     trotzdem nicht: die Diagnose liest den PR, nicht den Post-Merge-Lauf.
+test('Merge-Diagnose: gh weist den Merge aus → gemergt, aber Post-Merge unbewiesen', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return null
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'MERGED', merged: true, checksGreen: 20, checksRed: 0, checksPending: 0, mergeCheckState: 'SUCCESS', note: 'mergedAt gesetzt' }
+      }
+      return undefined
+    },
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.pr, 101)
+  assert.ok(!d1.needsHuman, 'ein per gh belegter Merge ist kein Fehlschlag')
+  assert.ok(!d1.mergeBlocked)
+  assert.equal(d1.postMergeUnverified, true, 'der Bericht muss ausweisen, dass der Post-Merge-Beweis nicht gelaufen ist')
+  assert.equal(d1.postMerge, 'unmeasured', 'niemand hat den Default-Branch gelesen — "green" wäre eine erfundene Messung')
+  none(calls, /^needs-human /)
+  none(calls, /^merge-blocked /)
+  only(calls, 'cleanup #1')
+  only(calls, 'learnings #1')
+  assert.equal(doneOf(report, 2).pr, 102, 'der Blocker ist erledigt — der Abhängige muss anlaufen')
+  assert.equal(report.stopped, null)
+})
+
+// 44. Variante mit non-null gate: die Station meldet merged:false MIT note (und
+//     sogar postMerge 'red'), gh widerspricht. Der belegte Merge gewinnt — aber
+//     das unbelegte Rot darf keine onSmokeFailure-Policy auslösen.
+test('Merge-Diagnose: belegter Merge überschreibt die Meldung der Merge-Station', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator', onSmokeFailure: 'p0-issue' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return { merged: false, postMerge: 'red', note: 'gh pr merge meldete einen Fehler' }
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'MERGED', merged: true, checksGreen: 20, checksRed: 0, checksPending: 0, mergeCheckState: 'SUCCESS', note: 'mergedAt gesetzt' }
+      }
+      return undefined
+    },
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.postMerge, 'unmeasured', 'ein Rot ohne gelaufenen Post-Merge-Beweis darf nicht als Rot durchgereicht werden')
+  assert.equal(d1.postMergeUnverified, true)
+  assert.equal(report.stopped, null, 'kein Policy-Stop auf einem unbelegten Rot')
+  assert.ok(/Merge nachträglich per gh verifiziert/.test(d1.note), d1.note)
+  assert.ok(/gh pr merge meldete einen Fehler/.test(d1.note), 'die Meldung der Merge-Station geht nicht verloren')
+})
+
+// 45. Ohne Befund wird NIE merge-blocked angenommen: fällt die Diagnose selbst
+//     aus, bleibt es beim konservativen needs-human.
+test('Merge-Diagnose ohne Ergebnis → needs-human, nie merge-blocked', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => ((c.label === 'gate-merge #1' || c.label === 'merge-diag #1') ? null : undefined),
+  })
+  only(calls, 'merge-diag #1')
+  only(calls, 'needs-human #1')
+  none(calls, /^merge-blocked /)
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(/Diagnose/.test(d1.note) && /101/.test(d1.note), `die note muss den Ausfall benennen: ${d1.note}`)
+})
+
+// 46. Laufende Checks sind NICHT "fertig". Ohne checksPending in der Bedingung
+//     behauptete der Kommentar am PR "grün und fertig", während drei Checks noch
+//     liefen — der Operator mergte einen ungeprüften PR von Hand.
+test('Merge-blockiert nur bei fertigem PR: laufende Checks führen zu needs-human', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return null
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'OPEN', merged: false, checksGreen: 1, checksRed: 0, checksPending: 3, mergeCheckState: 'SUCCESS', note: '3 Checks laufen noch' }
+      }
+      return undefined
+    },
+  })
+  none(calls, /^merge-blocked /)
+  only(calls, 'needs-human #1')
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true)
+  assert.ok(/laufend 3/.test(d1.note), `die Zahl der laufenden Checks gehört in den Zustandstext: ${d1.note}`)
+})
+
+// 47. Ohne konfiguriertes mergeCheck greift der schwächere Fallback "mindestens
+//     ein grüner, kein roter, kein laufender Check". Ein Repo ganz ohne Checks
+//     landet konservativ in needs-human — ohne Check lässt sich über "grün"
+//     nichts behaupten.
+test('Merge-blockiert ohne mergeCheck: ein grüner Check reicht, gar keiner nicht', async () => {
+  const mk = (checksGreen) => runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return null
+      if (c.label === 'merge-diag #1') {
+        return { prState: 'OPEN', merged: false, checksGreen, checksRed: 0, checksPending: 0, mergeCheckState: 'ABSENT', note: `${checksGreen} grün` }
+      }
+      return undefined
+    },
+  })
+  const withCheck = await mk(1)
+  assert.equal(doneOf(withCheck.report, 1).mergeBlocked, true)
+  assert.ok(/\(keiner\)=ABSENT/.test(doneOf(withCheck.report, 1).note), 'der Zustandstext muss "kein Pflicht-Check konfiguriert" ausweisen')
+  const noCheck = await mk(0)
+  assert.ok(!doneOf(noCheck.report, 1).mergeBlocked, 'ohne einen einzigen grünen Check darf nichts als "fertig" gelten')
+  assert.equal(doneOf(noCheck.report, 1).needsHuman, true)
+  none(noCheck.calls, /^merge-blocked /)
+})
+
+// 48. Der Admin-Agent ist wie budgetStop abgesichert: sein Ausfall darf den
+//     festgestellten Zustand nicht in einen technischen Fehler umdeuten — sonst
+//     wird ein fertiger PR requeued und komplett neu gebaut.
+test('Merge-blockiert-Agent fällt aus: Zustand bleibt, kein Requeue, kein Stop', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => {
+      if (c.label === 'gate-merge #1') return null
+      if (c.label === 'merge-blocked #1') throw new Error('classifier stopped this too')
+      return undefined
+    },
+  })
+  assert.equal(doneOf(report, 1).mergeBlocked, true)
+  only(calls, 'build #1')
+  assert.equal(report.stopped, null)
+  assert.deepEqual(report.failed, [])
+  assert.ok(logs.some((l) => /Merge-blockiert-Agent fehlgeschlagen/.test(l)), 'der Ausfall muss im Log stehen — das Label fehlt dann auf GitHub')
+})
+
+// 49. Verzahnung mit dem Fortschritts-Circuit-Breaker (#31): eine
+//     Harness-seitige Merge-Blockade ist systemisch, nicht PR-spezifisch. Sitzt
+//     sie einmal, endet JEDE Einheit so — jede nach vollem Build und Gate.
+//     merge-blocked zählt deshalb als KEIN Fortschritt.
+test('Merge extern blockiert: drei blockierte Einheiten halten den Lauf an', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => (/^gate-merge /.test(c.label) ? null : undefined),
+  })
+  assert.ok(report.stopped, 'ein Lauf, in dem kein einziger Merge durchgeht, darf nicht bis zum Ende brennen')
+  assert.equal(report.stopped.issue, 3)
+  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), report.stopped.reason)
+  assert.ok(/Merge extern blockiert/.test(report.stopped.reason), 'der Stop-Grund muss den auslösenden Zustand benennen')
+  assert.deepEqual(report.remaining, [4], 'die vierte Einheit bleibt unangetastet in der Queue')
+})
+
+// 50. Gegenprobe zum Umbau: der NORMALE Merge behält seine Berichtsform. Ohne
+//     diesen Test könnte der neue Pfad die note oder postMergeUnverified des
+//     Erfolgsfalls still verändern, ohne dass ein Test es merkt.
+test('Regulärer Merge: keine Diagnose, note aus der Merge-Station, unverified false', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (c.label === 'gate-merge #1'
+      ? { merged: true, postMerge: 'green', note: 'squash-merged, Lauf 42 grün' }
+      : undefined),
+  })
+  none(calls, /^merge-diag /)
+  none(calls, /^merge-blocked /)
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.postMerge, 'green')
+  assert.equal(d1.note, 'squash-merged, Lauf 42 grün')
+  assert.equal(d1.postMergeUnverified, false)
+  assert.ok(!d1.mergeBlocked)
 })
 
 // ---------------------------------------------------------------------------

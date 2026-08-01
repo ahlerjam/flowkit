@@ -172,11 +172,18 @@ Erster Griff: `/flowkit:status`. In dieser Reihenfolge lesen:
    nur bewusst mit `resume all`. Stammt der PR aus einem Lauf vor 0.8.0 und ist
    noch Draft: `resume` setzt ihn automatisch wieder ready; ohne Resume hilft
    nur ein manuelles `gh pr ready <N>`.
-3. **Letzte Läufe** — erledigt/needs-human/blocked und der Stop-Grund des
-   Nachtlaufs.
-4. **Budget-Kalibrierung** — nach einigen Delta-Läufen die Vorschläge für
+3. **merge-blocked** — der PR ist grün und fertig, nur der Merge wurde
+   angehalten (typisch bei unbeaufsichtigten Läufen). Kein resume: nach
+   Freigabe von Hand mergen (`gh pr merge <PR> --squash --delete-branch`) oder
+   das Label gegen `agent-ready` tauschen, damit die nächste Nacht es erneut
+   versucht. Häufen sich diese Fälle in einer Nacht, hält der Lauf von selbst an
+   (Fortschritts-Circuit-Breaker) — die Blockade ist dann systemisch.
+4. **Letzte Läufe** — erledigt/needs-human/merge-blocked/blocked, die Zahl der
+   Einheiten mit ungeprüftem Post-Merge (`post-merge-unmeasured`) und der
+   Stop-Grund des Nachtlaufs.
+5. **Budget-Kalibrierung** — nach einigen Delta-Läufen die Vorschläge für
    `budgets.<size>.tokens` sichten; Übernahme bleibt Operator-Entscheidung.
-5. Die über Nacht gemergten PRs quer lesen. Auto-Merge heißt geprüft, nicht
+6. Die über Nacht gemergten PRs quer lesen. Auto-Merge heißt geprüft, nicht
    ungesehen.
 
 ## 6. Abschlussbericht

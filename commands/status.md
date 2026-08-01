@@ -34,7 +34,7 @@ Teil-Lagebild ist besser als eine Fehlermeldung.
 1. **(a) Queues — Anzahl + Top 5 je Label:**
 
        printf '%s' "$ISSUES" | jq -r '
-         ["agent-ready","needs-triage","budget-exceeded","needs-human"] as $queues
+         ["agent-ready","needs-triage","budget-exceeded","needs-human","merge-blocked"] as $queues
          | . as $all
          | $queues[] as $q
          | [$all[] | select(any(.labels[].name; . == $q))] as $hit
@@ -48,32 +48,43 @@ Teil-Lagebild ist besser als eine Fehlermeldung.
    SessionStart-Hook (`templates/hooks/inject-context.sh`). Ein Issue darf in
    mehreren Queues auftauchen (z. B. `needs-human` + `budget-exceeded`); das ist
    gewollt und wird nicht „entdoppelt". Top 5 sortiert nach `updatedAt` absteigend,
-   also zuletzt bewegte zuerst. Sind alle vier Zahlen 0, eine Zeile ausgeben:
+   also zuletzt bewegte zuerst. Sind alle fünf Zahlen 0, eine Zeile ausgeben:
    `Queues: leer (keine offenen Issues mit flowkit-Labels)`.
 
-2. **(b) Gestrandete Arbeit (Muster wie der resume-Scope in `skills/implement`):**
-   Offene Issues mit `budget-exceeded` oder `needs-human`, zu denen ein OFFENER PR
-   existiert. Beide Listen liegen aus Schritt 0 schon vor, der Abgleich ist lokal:
+2. **(b) Gestrandete Arbeit (Muster wie der resume-Scope in `skills/implement`,
+   plus `merge-blocked`, das kein resume-Modus greift):**
+   Offene Issues mit `budget-exceeded`, `needs-human` oder `merge-blocked`, zu
+   denen ein OFFENER PR existiert. Beide Listen liegen aus Schritt 0 schon vor,
+   der Abgleich ist lokal:
 
        printf '%s' "$ISSUES" | jq -r '.[] | [.labels[].name] as $l
-         | select(any($l[]; . == "budget-exceeded" or . == "needs-human"))
+         | select(any($l[]; . == "budget-exceeded" or . == "needs-human" or . == "merge-blocked"))
          | [(.number|tostring),
-            ($l | map(select(. == "budget-exceeded" or . == "needs-human")) | join("+")),
+            ($l | map(select(. == "budget-exceeded" or . == "needs-human" or . == "merge-blocked")) | join("+")),
             .title] | @tsv'
        printf '%s' "$PRS" | jq -r '.[] | [(.number|tostring), (.isDraft|tostring),
          ((.title + " " + (.body // "")) | gsub("[\\r\\n\\t]"; " "))] | @tsv'
 
    Zuordnung je Issue-Nummer `N` über den PR-Text, mit Wortgrenze, damit `#12` nicht
    `#123` trifft: `grep -iE "close[sd]?[[:space:]]+#N([^0-9]|$)"`. Ausgabe je
-   Treffer: `#N (<labels>, PR #M draft) <titel>`. Issues mit diesen Labels, aber
-   OHNE offenen PR, gehören NICHT in den resume-Scope (nichts zum Aufsetzen) — sie
-   trotzdem zeigen, mit dem Zusatz `ohne offenen PR — nicht im resume-Scope`.
+   Treffer: `#N (<labels>, PR #M draft) <titel>`. `budget-exceeded`- und
+   `needs-human`-Issues OHNE offenen PR gehören NICHT in den resume-Scope (nichts
+   zum Aufsetzen) — sie trotzdem zeigen, mit dem Zusatz `ohne offenen PR — nicht
+   im resume-Scope`. `merge-blocked` ist von der resume-Frage unabhängig: dieses
+   Label erreicht ohnehin kein resume-Modus (siehe unten).
    Hinweiszeilen darunter, genau wie der Runner sie deutet:
    - mindestens ein `budget-exceeded`-Treffer mit PR → `/flowkit:implement resume`
    - mindestens ein `needs-human`-Treffer mit PR → `/flowkit:implement resume all`
      (dieses Label heißt: ein Mensch muss erst den gemeldeten Blocker im letzten
      Issue-Kommentar entscheiden; `resume all` ist die bewusste Zustimmung, es
      trotzdem erneut zu versuchen)
+   - mindestens ein `merge-blocked`-Treffer mit PR → KEIN resume, sondern: der PR
+     ist grün und fertig, nach Freigabe von Hand mergen (`gh pr merge <PR>
+     --squash --delete-branch`). Ein Resume-Lauf würde einen fertigen PR nur neu
+     verifizieren; und weil das Issue weder `budget-exceeded` noch `needs-human`
+     trägt, würde ihn ohnehin kein resume-Scope einsammeln. Soll der Runner es
+     doch erneut versuchen, tauscht der Operator die Labels
+     (`gh issue edit <N> --remove-label merge-blocked --add-label agent-ready`).
    Kein Treffer → `Gestrandete Arbeit: keine`.
 
 3. **(c) Letzte 5 Läufe** aus `.flowkit/runs/*.json` (lokal, kein GitHub). Dateien
@@ -82,15 +93,22 @@ Teil-Lagebild ist besser als eine Fehlermeldung.
 
        jq -r --arg f "<dateiname ohne .json>" '
          "\($f)  scope=\(.scope // "?")"
-         + "  erledigt=\([(.done // [])[] | select(((.needsHuman // false) | not) and ((.skipped // false) | not))] | length)"
+         + "  erledigt=\([(.done // [])[] | select(((.needsHuman // false) | not) and ((.skipped // false) | not) and ((.mergeBlocked // false) | not))] | length)"
          + "  needs-human=\([(.done // [])[] | select(.needsHuman == true)] | length)"
+         + "  merge-blocked=\([(.done // [])[] | select(.mergeBlocked == true)] | length)"
+         + "  post-merge-unmeasured=\([(.done // [])[] | select(.postMerge == "unmeasured")] | length)"
          + "  blocked=\((.blocked // []) | length)"
          + "  tokenMode=\(.tokenMode // "?")"
          + (if ((.stopped.reason // "") == "") then "" else "  stop=\(.stopped.reason)" end)' "$f"
 
    Der Dateiname trägt Datum und Scope (`<YYYY-MM-DDTHH-MM>-<scope>.json`), deshalb
    braucht es kein separates Datumsfeld. `erledigt` zählt bewusst OHNE `skipped`
-   (bereits gemergte Issues sind keine Arbeit dieses Laufs). Fehlt das Verzeichnis
+   (bereits gemergte Issues sind keine Arbeit dieses Laufs) und OHNE
+   `mergeBlocked` — dort gab es keinen Merge, die Bilanz behauptete sonst einen.
+   `post-merge-unmeasured` zählt gemergte Einheiten, deren Post-Merge-Beweis
+   unbestimmt blieb (abgebrochener CI-Lauf) oder gar nicht lief (Merge erst
+   nachträglich per gh belegt): kein Fehler, aber der Default-Branch ist für
+   diese Einheiten ungeprüft. Fehlt das Verzeichnis
    oder ist es leer: `(keine Daten — noch kein Lauf-Bericht unter .flowkit/runs)`.
    Einzelne kaputte Dateien überspringen, nicht den Abschnitt.
 

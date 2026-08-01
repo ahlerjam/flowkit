@@ -51,14 +51,19 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Migration (version + field) im Abschlussbericht (Schritt 8) ausweisen.
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
-   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6),
+   budget-exceeded (d93f0b), needs-human (d876e3), merge-blocked (0052cc, der PR
+   ist grün und fertig, der Merge wurde extern angehalten — ein Mensch mergt nach
+   Freigabe von Hand), flow/quick (c2e0c6),
    seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
    Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
-   `needs-human` und `budget-exceeded` setzt der Runner seit 0.8.0 zusätzlich am
-   zugehörigen PR — das ist dort das Signal „nicht mergen" und ersetzt das frühere
-   Draft-Setzen. Repo-Labels gelten für Issues und PRs gleichermaßen; ein zweites
-   Label ist NICHT anzulegen.
+   `needs-human`, `budget-exceeded` und `merge-blocked` setzt der Runner seit
+   0.8.0 zusätzlich am zugehörigen PR — das ist dort das Signal „nicht mergen"
+   bzw. „von Hand mergen" und ersetzt das frühere Draft-Setzen. Repo-Labels
+   gelten für Issues und PRs gleichermaßen; ein zweites Label ist NICHT
+   anzulegen. Fehlt `merge-blocked` im Zielrepo (Installation vor 0.8.0),
+   scheitert das `--add-label` des Runners still: der Zustand steht dann nur im
+   Lauf-Bericht, nicht auf GitHub.
 4. **Board (optional, Stufe-1-Delta §13):** Labels sind in Stufe 1 die einzige
    Pflicht-Übersicht. Auf Operator-Wunsch: `gh project create --owner <owner>
    --title "flowkit — <repo>"` anlegen und dem Operator sagen, dass die

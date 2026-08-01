@@ -18,6 +18,25 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   consecutive units without a merge (needs-human, budget abort or technical
   error); a merge or a gh-verified skip resets the counter, blocked units do
   not count. Default 3, `0` disables it. (#31)
+- Merge diagnosis station and the new `merge-blocked` state: when the merge
+  station returns nothing (the harness can stop an unattended merge) or reports
+  `merged != true`, a read-only station reads the real PR state — `state`,
+  `mergedAt`, green/red/pending check counts and the configured `mergeCheck` —
+  before the unit is judged. The scheduler, not the agent, then picks one of
+  three outcomes: a merge gh confirms counts as a success, but the post-merge
+  proof did not run, so the unit reports `postMerge: "unmeasured"` plus
+  `postMergeUnverified: true` rather than claiming green; a PR that is open,
+  green and finished (no red and no pending check) becomes `merge-blocked` —
+  label and comment on issue and PR, the PR stays open and ready, the run
+  continues, dependents do not start; everything else stays `needs-human`, now
+  carrying the state that was read instead of "kein Ergebnis". A blocked merge
+  counts as no progress for the circuit breaker, because a harness-side block is
+  systemic rather than PR-specific. New report fields: `done[].mergeBlocked` and
+  `done[].postMergeUnverified`. `/flowkit:setup` creates the `merge-blocked`
+  label (existing repos need to re-run it, otherwise the label call fails
+  silently and the state only shows up in the run report); `/flowkit:status`
+  lists the queue and a new `merge-blocked` / `post-merge-unmeasured` tally, and
+  the SessionStart hook points at a manual merge instead of a resume. (#37)
 
 ### Changed
 - The merge station's post-merge proof is now three-valued: the gate return

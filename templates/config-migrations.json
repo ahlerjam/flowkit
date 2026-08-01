@@ -27,7 +27,7 @@
     "version": "0.8.0",
     "field": "progressStopAfter",
     "default": 3,
-    "note": "Fortschritts-Circuit-Breaker: der Lauf hält an, wenn so viele Einheiten IN FOLGE ohne Merge enden (needs-human, Budget-Abbruch, technischer Fehler). Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück. 0 schaltet ihn ab — nur bewusst setzen, dann kann ein Lauf wieder die komplette Queue erfolglos durcharbeiten (Issue #31)."
+    "note": "Fortschritts-Circuit-Breaker: der Lauf hält an, wenn so viele Einheiten IN FOLGE ohne Merge enden (needs-human, Budget-Abbruch, extern blockierter Merge, technischer Fehler). Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück. 0 schaltet ihn ab — nur bewusst setzen, dann kann ein Lauf wieder die komplette Queue erfolglos durcharbeiten (Issue #31)."
   },
   {
     "version": "0.8.0",

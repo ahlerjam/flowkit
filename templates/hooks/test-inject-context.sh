@@ -19,6 +19,7 @@
 #   (g) Versionen ungleich         → genau eine Drift-Zeile mit beiden Versionen
 #   (h) Stempel-Datei fehlt bzw. CLAUDE_PLUGIN_ROOT ungesetzt → keine
 #                                    Drift-Zeile, keine Fehler
+#   (i) nur merge-blocked-Treffer  → eigener Hinweis, KEIN resume
 set -u
 SCRIPT_ARG="${1:-}"
 if [ -n "$SCRIPT_ARG" ]; then
@@ -132,6 +133,30 @@ EOF
     && printf '%s\n' "$OUT" | grep -qF "[flowkit] gestrandet: #21 (needs-human) Needs a decision" \
     && printf '%s\n' "$OUT" | grep -q '^\[flowkit\] -> /flowkit:implement resume all$'; then ok
   else ko "(e) nur needs-human: erwartet 'resume all', bekam rc=$RC: '$OUT'"; fi
+
+  # (i) merge-blocked: eigener Hinweis statt resume — der PR ist fertig, es
+  #     fehlt nur die Merge-Freigabe. Die letzte Bedingung fängt den
+  #     naheliegenden Implementierungsfehler ab, das Label nur in den Filter
+  #     aufzunehmen und den else-Zweig stehen zu lassen: dann käme fälschlich
+  #     'resume all'.
+  FIX3="$WORK/fix3"; mkdir -p "$FIX3"
+  cat > "$FIX3/issues.json" <<'EOF'
+[
+  {"number": 31, "title": "Merge blockiert", "labels": [{"name": "merge-blocked"}]}
+]
+EOF
+  cat > "$FIX3/prs.json" <<'EOF'
+[
+  {"number": 41, "title": "feat: fertig", "body": "Closes #31", "isDraft": false}
+]
+EOF
+  OUT="$(env PATH="$STUB:$PATH" GH_STUB_FIX="$FIX3" GH_STUB_JQ="$JQ_BIN" \
+    CLAUDE_PROJECT_DIR="$REPO" bash "$HOOK" </dev/null 2>&1)"; RC=$?
+  if [ "$RC" -eq 0 ] \
+    && printf '%s\n' "$OUT" | grep -qF "[flowkit] gestrandet: #31 (merge-blocked, PR #41) Merge blockiert" \
+    && printf '%s\n' "$OUT" | grep -q '^\[flowkit\] -> merge-blocked: PR ist grün' \
+    && ! printf '%s\n' "$OUT" | grep -q 'implement resume'; then ok
+  else ko "(i) merge-blocked: erwartet eigenen Hinweis ohne resume, bekam rc=$RC: '$OUT'"; fi
 fi
 
 # --- Fixtures für Template-Versions-Drift (f)/(g)/(h) ---------------------

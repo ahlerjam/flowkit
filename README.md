@@ -57,6 +57,15 @@ directly — the install arrives as a pull request.
   list via `ciInfraSignatures`.
 - **Auto-merge only with active branch protection**; post-merge smoke check with
   a configurable `onSmokeFailure` policy (`revert` by default).
+- **A merge the harness refuses is not a failed unit:** if the merge station
+  comes back empty (an unattended merge can be stopped by the safety layer), a
+  read-only diagnosis reads the real PR state and the scheduler decides — the PR
+  is already merged (the unit counts as done, with the post-merge proof flagged
+  as not run), or it is open, green and finished but unmerged (`merge-blocked`:
+  labeled and commented on issue and PR, PR stays open and ready, waiting for a
+  human merge), or genuinely not ready (`needs-human`, carrying the state that
+  was read). The report never says "no result" again. A blocked merge counts as
+  no progress, so a systemic block halts the run instead of repeating itself.
 - **The builder's claim is checked against GitHub**, not believed: a `pr-check`
   station resolves the PR via `gh pr list --search "Closes #<n>"` right after the
   build, and every later station uses that number and branch. No PR on GitHub is

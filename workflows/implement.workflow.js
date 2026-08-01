@@ -290,6 +290,24 @@ const PRCHECK_SCHEMA = {
     note: { type: 'string' },
   },
 }
+// Weltzustand des PR statt Agenten-Prosa (Issue #37): die Engine hat weder
+// Datei- noch Bash-Zugriff — jede Prüfung des Weltzustands läuft über agent()
+// mit erzwungenem Schema, sonst wäre die Klassifikation wieder Prosa und nicht
+// deterministisch. checksPending steht bewusst NEBEN grün/rot: ohne diese Zahl
+// gälte ein PR mit einem fertigen grünen und drei laufenden Checks als "grün und
+// fertig" — der Operator bekäme eine Falschaussage und mergte ungeprüft.
+const MERGE_STATE_SCHEMA = {
+  type: 'object', required: ['prState', 'merged', 'checksGreen', 'checksRed', 'checksPending', 'mergeCheckState'], additionalProperties: false,
+  properties: {
+    prState: { type: 'string', description: 'OPEN | CLOSED | MERGED — wörtlich aus gh pr view --json state' },
+    merged: { type: 'boolean', description: 'true NUR, wenn gh pr view --json mergedAt einen Zeitstempel liefert' },
+    checksGreen: { type: 'integer', description: 'Anzahl SUCCESS-Checks' },
+    checksRed: { type: 'integer', description: 'Anzahl FAILURE/ERROR/CANCELLED/TIMED_OUT-Checks' },
+    checksPending: { type: 'integer', description: 'Anzahl noch laufender Checks (IN_PROGRESS/QUEUED/PENDING) — weder grün noch rot, aber "nicht fertig"' },
+    mergeCheckState: { type: 'string', description: 'Zustand des Pflicht-Checks: SUCCESS | FAILURE | PENDING | ABSENT' },
+    note: { type: 'string', description: 'ein Satz Klartext zum Zustand — nie "kein Ergebnis"' },
+  },
+}
 const PREFLIGHT_SCHEMA = {
   type: 'object', required: ['clean'], additionalProperties: false,
   properties: { clean: { type: 'boolean' }, note: { type: 'string' } },
@@ -407,6 +425,16 @@ const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station f
 5f. Ergebnis: grün${C.commands.smoke ? ` UND Smoke grün (${C.commands.smoke} — schlägt er fehl, ist das ein echter roter Befund)` : ''} → postMerge: "green". Rot → postMerge: "red" UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Unbestimmt geblieben → postMerge: "unmeasured": KEINE Policy, KEIN Revert, KEIN Issue — bei "unmeasured" ist note PFLICHT (Lauf-ID, headSha und conclusion hinein), sonst steht im Bericht ein stummer Zustand. Grund immer in note.
 Return { merged, postMerge } erst nach Schritt 4/5. "red" nur mit einem abgeschlossenen Lauf AUF DEINEM EIGENEN Merge-Commit mit conclusion failure/timed_out (oder rotem Smoke) als Beleg — im Zweifel "unmeasured".`
 
+// Merge-Diagnose (Issue #37): liefert die Merge-Station nichts (die Harness kann
+// sie anhalten — agent() gibt dann null zurück) oder meldet sie merged !== true,
+// ist der gelesene PR-Zustand die einzige Ground Truth. Diese Station MERGT
+// NICHTS; nur deshalb löst sie denselben Block nicht ein zweites Mal aus.
+const mergeDiagPrompt = (n, pr) => `${PRE}Du bist die MERGE-DIAGNOSE für PR #${pr} (Issue #${n}). Die Merge-Station hat kein verwertbares Ergebnis geliefert (häufigster Grund: die Harness hat sie angehalten). Du stellst NUR den Tatbestand fest — reines Lesen: KEIN gh pr merge, KEIN Push, KEIN Fix, KEIN Label, KEIN Kommentar, keine Mutation irgendeiner Art.
+1. gh pr view ${pr} -R ${SLUG} --json number,state,mergedAt,isDraft — merged: true NUR, wenn mergedAt einen Zeitstempel trägt; prState wörtlich aus state (OPEN/CLOSED/MERGED).
+2. gh pr checks ${pr} -R ${SLUG} --json name,state — checksGreen = Anzahl SUCCESS, checksRed = Anzahl FAILURE/ERROR/CANCELLED/TIMED_OUT, checksPending = Anzahl IN_PROGRESS/QUEUED/PENDING. Laufende Checks zählen weder grün noch rot, aber sie werden GEZÄHLT: solange einer läuft, ist der PR nicht fertig.${C.mergeCheck ? ` mergeCheckState = Zustand des Pflicht-Checks "${C.mergeCheck}" wörtlich (SUCCESS/FAILURE/PENDING); fehlt er in der Liste: ABSENT.` : ' Ohne konfigurierten Pflicht-Check: mergeCheckState = ABSENT.'}
+3. note: EIN Satz Klartext mit dem, was ein Operator wissen muss — bei roten Checks deren Namen, bei laufenden deren Zahl, sonst der Grund, warum der PR noch offen ist. "kein Ergebnis" ist als note verboten.
+Return { prState, merged, checksGreen, checksRed, checksPending, mergeCheckState, note } — ausschließlich aus der gh-Ausgabe, nie aus Vermutung.`
+
 const learnPrompt = (n, pr, u) => `${PRE}Du bist die LEARNINGS-Station für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert). Du destillierst das ÜBERTRAGBARE Wissen dieser Einheit für spätere Läufe. Du implementierst NICHTS, pushst nichts, kommentierst nichts auf GitHub.
 1. Quellen: gh pr view ${pr} -R ${SLUG} --json title,body,comments und gh pr diff ${pr} -R ${SLUG} (die Review-/AC-Verify-Kommentare sind die ergiebigste Quelle — dort steht, was beim ersten Anlauf schiefging).
 2. mkdir -p .flowkit/learnings, dann genau EINE Datei schreiben: .flowkit/learnings/${n}-<slug>.md (<slug> aus dem Issue-Titel: klein, nur a-z0-9 und Bindestriche, höchstens 5 Wörter). Existiert sie bereits, überschreiben.
@@ -439,6 +467,23 @@ const runUnit = async (u) => {
       LOG(`#${n} Budget-Abbruch-Agent fehlgeschlagen (Label/Kommentar evtl. nicht gesetzt): ${e && e.message ? e.message : String(e)}`)
     }
     return { budgetExceeded: true, note: stand }
+  }
+
+  // Extern blockierter Merge (Issue #37): der PR ist nach gh-Befund grün, offen
+  // und fertig, nur der Merge selbst lief nicht. Das ist KEIN inhaltliches
+  // Scheitern — eigener Zustand, eigenes Label, und der PR bleibt unangetastet
+  // (offen, ready), damit ein Mensch ihn nach Freigabe mergt. Wie budgetStop ist
+  // der Admin-Agent abgesichert: sein Ausfall darf den festgestellten Zustand
+  // nicht in einen technischen Fehler und damit in ein Requeue eines fertigen
+  // PR umdeuten.
+  const mergeBlockedStop = async (pr, stand) => {
+    try {
+      await agent(`${PRE}MERGE BLOCKIERT für Issue #${n} (PR #${pr}). Der Merge wurde nicht ausgeführt (typischerweise vom Sicherheitssystem der Harness angehalten); der PR ist nach gh-Befund grün, fertig und offen. Zustand: ${stand}. Du mergst NICHTS: kein gh pr merge, kein Push, kein Fix. Handle exakt und NUR das: 1. gh pr comment ${pr} -R ${SLUG}: "Autonomer Lauf angehalten — Merge nicht ausgeführt." plus den Zustand oben wörtlich plus "PR ist grün und fertig, es fehlt nur die Merge-Freigabe." 2. gh pr edit ${pr} -R ${SLUG} --add-label merge-blocked. 3. gh issue comment ${n} -R ${SLUG}: derselbe Zustand in einem Satz mit Verweis auf PR #${pr}, dazu als Klartext (KEINE Befehlszeilen, weder hier noch sonstwo in deiner Ausgabe) die zwei Wege zurück, die einem MENSCHEN offenstehen: den PR nach Freigabe von Hand mergen, oder am Issue das Label merge-blocked gegen agent-ready tauschen, damit ein späterer Lauf die Einheit erneut aufnimmt. Du selbst gehst KEINEN dieser Wege. 4. gh issue edit ${n} -R ${SLUG} --add-label merge-blocked --remove-label agent-ready. 5. ${wtCleanup(n)} Den PR NICHT schließen, NICHT auf Draft setzen, den Remote-Branch NICHT löschen und keine lokalen Branches dieses Issues löschen — der PR wird von Hand gemergt.`,
+        { label: `merge-blocked #${n}`, phase: 'Implement', model: 'haiku' })
+    } catch (e) {
+      LOG(`#${n} Merge-blockiert-Agent fehlgeschlagen (Label/Kommentar evtl. nicht gesetzt): ${e && e.message ? e.message : String(e)}`)
+    }
+    return { mergeBlocked: true, pr, note: stand }
   }
 
   if (u.lane !== 'quick') {
@@ -542,7 +587,39 @@ const runUnit = async (u) => {
   if (gateDiag.infraRerun) LOG(`#${n} Gate-Wait: CI-Infrastruktur-Re-Run (gh run rerun --failed) war nötig — er zählt NICHT auf maxFixRounds.`)
   if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'} ${gateDiagText(gateDiag)}`)
   const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
-  if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
+  let mergeNote = (gate && gate.note) || ''
+  let mergePost = gate ? gate.postMerge : 'unmeasured'
+  let postMergeUnverified = false
+  if (!gate || gate.merged !== true) {
+    // Ground Truth ist gh, nicht das Agent-JSON (Issue #37): die Merge-Station
+    // kann angehalten worden sein (agent() liefert dann null) oder erst NACH dem
+    // `gh pr merge` abgebrochen sein. Erst der gelesene PR-Zustand entscheidet,
+    // ob hier ein inhaltliches Scheitern, ein extern blockierter Merge oder in
+    // Wahrheit ein Erfolg vorliegt. "kein Ergebnis" landet nie mehr im Issue.
+    const diag = await agent(mergeDiagPrompt(n, pr), { label: `merge-diag #${n}`, phase: 'Implement', model: 'haiku', schema: MERGE_STATE_SCHEMA })
+    if (!diag) throw new Error(`GATE: Merge ohne Ergebnis, Merge-Diagnose für PR #${pr} ebenfalls ohne Ergebnis — Zustand unbekannt${mergeNote ? `; Meldung der Merge-Station: ${mergeNote}` : ''}`)
+    const stand = `PR #${pr} (${diag.prState}): merged=${diag.merged}, Checks grün ${diag.checksGreen} / rot ${diag.checksRed} / laufend ${diag.checksPending}, Pflicht-Check ${C.mergeCheck || '(keiner)'}=${diag.mergeCheckState}${diag.note ? `; ${diag.note}` : ''}${mergeNote ? `; Meldung der Merge-Station: ${mergeNote}` : '; die Merge-Station lieferte keine Meldung'}`
+    if (diag.merged === true) {
+      // Der Merge hat stattgefunden, nur die Rückmeldung fehlte. Die Einheit als
+      // gescheitert zu führen wäre falsch und würde ihre Abhängigen mit töten.
+      // GRÜN ist der Stand deshalb trotzdem nicht: die Diagnose liest den PR,
+      // nicht den Post-Merge-Lauf auf dem Default-Branch. Also 'unmeasured' plus
+      // ein eigenes Berichtsfeld, statt eine Messung zu behaupten, die niemand
+      // gemacht hat — die onSmokeFailure-Zusage bleibt so unangetastet.
+      mergeNote = `Merge nachträglich per gh verifiziert, Post-Merge-Beweis NICHT gelaufen: ${stand}`
+      mergePost = 'unmeasured'
+      postMergeUnverified = true
+      LOG(`#${n} Merge-Station ohne Ergebnis, gh weist den Merge aber aus — Einheit gilt als gemergt, der Post-Merge-Beweis fehlt: ${stand}`)
+    } else if (diag.prState === 'OPEN' && diag.checksRed === 0 && diag.checksPending === 0 && (C.mergeCheck ? diag.mergeCheckState === 'SUCCESS' : diag.checksGreen > 0)) {
+      // checksPending === 0 gehört in die Bedingung, nicht in die Kosmetik: ohne
+      // sie behauptete der Kommentar am PR "grün und fertig", während drei
+      // Checks noch laufen — der Operator mergte einen ungeprüften PR von Hand.
+      LOG(`#${n} Merge extern blockiert (PR grün, Merge nicht ausgeführt): ${stand}`)
+      return mergeBlockedStop(pr, stand)
+    } else {
+      throw new Error(`GATE: Merge fehlgeschlagen — ${stand}`)
+    }
+  }
 
   // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
   // UNVERÄNDERTE Worktrees auf — nach einem Build bleiben Worktree + lokaler
@@ -568,15 +645,19 @@ const runUnit = async (u) => {
   }
   // Unbekannter/fehlender Wert fällt bewusst auf 'unmeasured', nicht auf 'red':
   // ohne Beleg wird nicht revertet und nicht gestoppt (Issue #32).
-  const pm = ['green', 'red', 'unmeasured'].includes(gate.postMerge) ? gate.postMerge : 'unmeasured'
-  if (pm !== gate.postMerge) LOG(`#${n} Merge-Station lieferte postMerge=${JSON.stringify(gate.postMerge)} — als "unmeasured" gewertet (kein Revert ohne Beleg).`)
+  // Quelle ist mergePost/mergeNote, nicht mehr gate.* (Issue #37): `gate` darf
+  // hier null sein — die Merge-Diagnose hat den Merge dann nachträglich belegt.
+  const pm = ['green', 'red', 'unmeasured'].includes(mergePost) ? mergePost : 'unmeasured'
+  if (pm !== mergePost) LOG(`#${n} Merge-Station lieferte postMerge=${JSON.stringify(mergePost)} — als "unmeasured" gewertet (kein Revert ohne Beleg).`)
   // note ist bei 'unmeasured' die EINZIGE operator-sichtbare Evidenz; das Schema
   // kann sie nicht erzwingen (required würde die anderen zwei Zustände mitfangen),
   // deshalb hier ein Ersatztext statt eines stummen Eintrags im Bericht.
-  const gateNote = gate.note || (pm === 'unmeasured' ? 'unmeasured ohne Begründung der Merge-Station' : '')
+  const gateNote = mergeNote || (pm === 'unmeasured' ? 'unmeasured ohne Begründung der Merge-Station' : '')
   // gateDiag auch im Erfolgsfall: ein Draft, den die Station stillschweigend
   // geheilt hat, wäre sonst der häufigste Fall OHNE jede Spur im Bericht.
-  return { pr, fixRounds, gateDiag, postMerge: pm, note: gateNote }
+  // postMergeUnverified trennt "Beweis gelaufen, unbestimmt" von "Beweis lief
+  // gar nicht" — beides steht als postMerge: 'unmeasured' im Bericht.
+  return { pr, fixRounds, gateDiag, postMerge: pm, note: gateNote, postMergeUnverified }
 }
 
 let mergeChain = Promise.resolve()
@@ -719,14 +800,23 @@ const worker = async () => {
       const tokens = TOKEN_MODE === 'delta' ? budget.spent() - start : null
       done.push(Object.assign({ issue: u.n, tokens, size: u.size }, res))
       // Dependency-Buchführung: ein Budget-Abbruch ist KEINE Erledigung — die
-      // Arbeit ist nicht gemergt, Abhängige dürfen darauf nicht aufsetzen.
-      if (res.budgetExceeded) unresolved.add(u.n)
+      // Arbeit ist nicht gemergt, Abhängige dürfen darauf nicht aufsetzen. Für
+      // einen extern blockierten Merge gilt dasselbe (Issue #37): der Code liegt
+      // nicht auf dem Default-Branch, ein Abhängiger baute gegen etwas, das es
+      // dort nicht gibt.
+      if (res.budgetExceeded || res.mergeBlocked) unresolved.add(u.n)
       else doneOk.add(u.n)
-      LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
+      LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.mergeBlocked ? 'MERGE-BLOCKIERT' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
       // Ein Merge und eine gh-verifizierte Erledigung setzen den Zähler zurück,
       // ein Budget-Abbruch zählt hoch: er hat Tokens verbrannt, aber nichts
       // gemergt. Drei davon in Folge heißen "die Budgets sind falsch kalibriert".
-      noteOutcome(!res.budgetExceeded, u, `Budget-Abbruch ohne Merge: ${res.note || ''}`)
+      // Ein blockierter Merge zählt ebenfalls hoch (Issue #37): eine
+      // Harness-seitige Blockade ist systemisch, nicht PR-spezifisch — sitzt sie
+      // einmal, endet JEDE Einheit so, jede nach vollem Build und Gate. Nach
+      // progressStopAfter solchen Einheiten hält der Lauf an, statt sein Budget
+      // für einen Zustand zu verbrennen, der nach der ersten feststand.
+      noteOutcome(!res.budgetExceeded && !res.mergeBlocked, u,
+        res.mergeBlocked ? `Merge extern blockiert: ${res.note || ''}` : `Budget-Abbruch ohne Merge: ${res.note || ''}`)
       if (res.postMerge === 'red') {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
         LOG(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
@@ -796,6 +886,12 @@ if (PAR > 1) {
   await worker()
 }
 
+// Kein neues Top-Level-Feld im Return: needsHuman und budgetExceeded leben
+// ebenfalls nur als Flag im done-Eintrag; failed/blocked stehen top-level, weil
+// jene Einheiten NICHT in done stehen. Zwei Quellen der Wahrheit wären teurer
+// als diese eine Log-Zeile.
+const mergeBlockedIssues = done.filter((d) => d.mergeBlocked).map((d) => d.issue)
+if (mergeBlockedIssues.length) LOG(`flowkit: ${mergeBlockedIssues.length} Einheit(en) extern merge-blockiert — PR grün und fertig, nur der Merge fehlt (Label merge-blocked; nach Freigabe von Hand mergen oder das Label gegen agent-ready tauschen): ${JSON.stringify(mergeBlockedIssues)}`)
 if (blocked.length) LOG(`flowkit: ${blocked.length} Einheit(en) dauerhaft blockiert (Blocker offen bzw. im Lauf gescheitert): ${JSON.stringify(blocked)}`)
 
 return { done, stopped, remaining: queue.map((u) => u.n), failed, blocked, deferredByBudget, parallelism: PAR, tokenMode: TOKEN_MODE, runCap: TOKEN_MODE === 'run' ? runCap : null }
