@@ -312,6 +312,14 @@ statt still ewig zu blockieren.
   Urteil braucht der Mensch, der übernimmt (#35). Der LAUF fährt mit dem
   nächsten Issue fort. Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2
   laufen Fixes genau eine Modellstufe höher (CONFIG.models.escalation).
+- **Lauf bereits angehalten** (ein früherer Post-Merge war rot, die
+  `onSmokeFailure`-Policy lief): Einheiten, die zu diesem Zeitpunkt schon im
+  Merge-Lock warten, werden NICHT mehr gemergt — sie enden als `needs-human` mit
+  dem Grund „Lauf angehalten". Das ist kein Urteil über ihre Qualität: ihr PR ist
+  grün und fertig, es fehlt nur die Entscheidung des Operators, ob nach dem
+  Revert weitergemergt werden darf. Ohne diese Sperre würden hinter einem roten
+  Post-Merge aufgelaufene Einheiten weiter auf den Default-Branch mergen,
+  während der Revert-PR noch offensteht.
 - **Extern blockierter Merge** (die Merge-Station lief nicht durch, der PR ist
   laut gh aber offen, ohne roten und ohne laufenden Check und mit grünem
   CONFIG.mergeCheck — etwa weil das Sicherheitssystem der Harness einen
