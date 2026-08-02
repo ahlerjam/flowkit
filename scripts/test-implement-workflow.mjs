@@ -748,6 +748,168 @@ test('buildPrompt: Schema-Beschreibung und Return-Zeile verbieten geratenes pr:0
     'die Return-Zeile muss dem Builder verbieten, die PR-Nummer zu raten')
 })
 
+// 15c. Ein MEHRDEUTIGER Befund (zwei verifizierte offene PRs) ist kein
+//      technischer Fehler: die Station erkennt ihn bewusst, aber ohne eigenes
+//      Feld war er in runUnit von "gar kein PR" nicht unterscheidbar — voller
+//      Requeue inklusive zweitem Builder-Lauf, beim identischen zweiten Befund
+//      Stop des GANZEN Laufs, und am Issue stand weder Label noch Kommentar.
+//      Auflösen kann das nur ein Mensch; also braucht es die GitHub-sichtbare
+//      Klasse, die der strukturgleiche merge-blocked schon hat.
+test('pr-check: mehrdeutiger Befund wird needs-human, nicht requeued', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg(),
+    respond: (c) => (c.label === 'pr-check #1'
+      ? { found: false, pr: 0, branch: '', state: 'NONE', ambiguous: true, note: 'mehrdeutig: #101, #109' }
+      : undefined),
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.needsHuman, true, 'ein mehrdeutiger Befund ist ein inhaltlicher Stopp, kein technischer Fehler')
+  assert.ok(/^GATE: Mehrdeutiger PR-Befund/.test(d1.note), `note war: ${d1.note}`)
+  assert.ok(d1.note.includes('mehrdeutig: #101, #109'), 'die Nummern der Kandidaten müssen im Issue-Kommentar stehen')
+  only(calls, 'needs-human #1')
+  assert.equal(find(calls, 'build #1').length, 1, 'kein zweiter Builder-Lauf auf einen Befund, den nur ein Mensch auflöst')
+  assert.equal(report.stopped, null, 'ein einzelner mehrdeutiger Befund hält den Lauf nicht an')
+  assert.deepEqual(report.failed, [])
+  assert.deepEqual(report.blocked, [{ n: 2, by: [1] }], 'ohne gemergten Code bleibt der Abhängige blockiert')
+})
+
+// 15d. Gegenprobe: ohne das Feld bleibt alles wie bisher. `ambiguous` ist
+//      optional (wie die Diagnosefelder des WAIT_SCHEMA) — eine Station, die es
+//      nicht füllt, darf nicht plötzlich anders behandelt werden.
+test('pr-check: ohne ambiguous bleibt "kein PR" ein technischer Fehler', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (c.label === 'pr-check #1' ? { found: false, pr: 0, branch: '', state: 'NONE', note: 'kein Treffer' } : undefined),
+  })
+  assert.equal(find(calls, 'build #1').length, 2, 'der Erstfehler bleibt transient und wird requeued')
+  assert.deepEqual(report.failed, [1])
+  none(calls, /^needs-human /)
+})
+
+// 15e. Prompt- und Schema-Kopplung zum Fall aus 15c: verlangt der Prompt das
+//      Feld, muss additionalProperties: false es auch durchlassen — sonst
+//      verwirft die Engine jede Antwort damit und die Station fällt technisch
+//      aus. Zugleich der erste Formtest des PRCHECK_SCHEMA überhaupt: enum,
+//      required und additionalProperties waren ungeprüft (vier Mutationen,
+//      alle vakuum-grün), und ohne `schema` am Aufruf gälte das ganze Literal
+//      nicht.
+test('PRCHECK_SCHEMA: Form des Literals, ambiguous erlaubt aber nicht erzwungen', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const c = only(calls, 'pr-check #1')
+  const s = c.opts.schema
+  assert.ok(s, 'ohne schema am Aufruf ist das Literal wirkungslos — der Agent antwortet in Prosa')
+  assert.equal(s.type, 'object')
+  assert.deepEqual(s.required, ['found', 'pr', 'branch', 'state'],
+    'genau diese vier tragen den Befund; ein gekürztes required macht "kein PR" von "keine Antwort" ununterscheidbar')
+  assert.equal(s.additionalProperties, false, 'der Agent darf den Weltzustand nicht an den Feldern vorbei melden')
+  assert.deepEqual(s.properties.state.enum, ['OPEN', 'MERGED', 'CLOSED', 'NONE'],
+    'ohne enum wäre jeder Freitext ein Zustand — die MERGED- und OPEN-Zweige in runUnit hängen wörtlich daran')
+  assert.equal(s.properties.state.type, 'string', 'type NEBEN enum: bares enum nutzt kein Schema dieser Datei')
+  assert.equal(s.properties.found.type, 'boolean')
+  assert.equal(s.properties.pr.type, 'integer')
+  assert.equal(s.properties.ambiguous.type, 'boolean')
+  assert.ok(!s.required.includes('ambiguous'), 'ambiguous bleibt optional — eine Antwort ohne das Feld ist weiter gültig')
+  assert.ok(/ambiguous=true/.test(c.prompt), 'der Prompt muss das Feld für den Mehrdeutigkeitsfall auch verlangen')
+  // Dieselbe Treffer-Regel wie im Builder und in den beiden Abbruch-Stationen —
+  // eine Zeichenfolgen-Prüfung ohne rechte Begrenzung nimmt #1XX mit, und ein
+  // Body, der auf "Closes #1" endet, hat rechts gar kein Zeichen mehr.
+  assert.ok(/rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt/.test(c.prompt),
+    'die Station ist die Referenz für alle vier Treffer-Verifikationen — sie muss selbst vollständig sein')
+})
+
+// 15f. Der Ausfall der Station selbst: der Wrapper normalisiert JEDEN Wurf auf
+//      einen Text OHNE GATE:-Präfix. Ohne ihn (nacktes `throw e`) würde ein
+//      zufällig so beginnender Fehlertext die Einheit als inhaltliches
+//      needs-human stilllegen, statt sie zu requeuen — deshalb wirft der Mock
+//      hier bewusst mit GATE:-Präfix.
+test('pr-check: Ausfall der Station bleibt technischer Fehler, auch bei GATE:-Text', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => { if (/^pr-check /.test(c.label)) throw new Error('GATE: Station nach innen durchgereicht') },
+  })
+  none(calls, /^needs-human /)
+  assert.equal(find(calls, 'build #1').length, 2, 'ein Stationsausfall ist transient — die Einheit wird requeued')
+  assert.equal(find(calls, 'cleanup #1').length, 2, 'Cleanup gehört in JEDE Abbruch-Routine')
+  assert.deepEqual(report.failed, [1])
+  assert.ok(/^PR-Check-Station ausgefallen: /.test(report.stopped.reason),
+    `der Stop-Grund muss die Station benennen und darf NICHT mit GATE: beginnen — war: ${report.stopped.reason}`)
+})
+
+// 15g. Builder und pr-check priorisierten OPEN/MERGED gegensätzlich: der Builder
+//      prüfte MERGED zuerst, die Station verlangt OPEN vor MERGED. Koexistieren
+//      beide Zustände (Issue nach dem Merge wiedereröffnet, dazu ein offener PR
+//      aus einem needs-human-Lauf), arbeiten beide prompt-konform — und die
+//      Einheit warf trotzdem, ohne GATE:, also mit Requeue und Lauf-Stop beim
+//      identischen zweiten Anlauf. Der Weltzustand schlägt die Behauptung.
+test('Builder meldet skipped, gh sagt OPEN: der offene PR wird übernommen', async () => {
+  const { report, calls, logs } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: true, note: 'gemergter PR #90 gefunden' }
+      if (c.label === 'pr-check #1') return { found: true, pr: 101, branch: 'feat/1-x', state: 'OPEN', note: 'offener PR schlägt gemergten' }
+      return undefined
+    },
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.pr, 101, 'die Einheit läuft mit dem offenen PR weiter')
+  assert.equal(d1.skipped, undefined, 'ein offener PR ist keine Erledigung')
+  assert.equal(d1.needsHuman, undefined)
+  assert.equal(d1.postMerge, 'green')
+  only(calls, 'ac-verify #1')
+  only(calls, 'gate-merge #1')
+  assert.equal(find(calls, 'build #1').length, 1, 'kein Requeue: die Konstellation reproduziert sich beim zweiten Anlauf')
+  assert.equal(report.stopped, null)
+  assert.equal(doneOf(report, 2).pr, 102, 'der Abhängige läuft nach dem Merge normal an')
+  assert.ok(logs.some((l) => /gh weist aber PR #101 als OPEN aus/.test(l)), 'LOG zur übernommenen Fehlmeldung fehlt')
+})
+
+// 15h. Dieselbe Prioritätsregel gehört in den Builder-Prompt, sonst repariert
+//      der Runner nur das Symptom: die Station prüft OPEN vor MERGED, der
+//      Builder prüfte MERGED zuerst.
+test('buildPrompt: offener PR schlägt gemergten, Treffer rechts begrenzt', async () => {
+  const p = only((await runWorkflow({ units: [unit(41)], config: cfg() })).calls, 'build #41').prompt
+  assert.ok(p.indexOf('Existiert ein OFFENER PR') < p.indexOf('Existiert NUR ein gemergter PR'),
+    'OFFEN muss vor GEMERGT geprüft werden — sonst widersprechen sich Bau- und Prüf-Station')
+  assert.ok(/rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt/.test(p),
+    'die Idempotenz-Suche muss dieselbe Treffer-Regel benutzen wie die pr-check-Station')
+  assert.ok(p.includes('"Closes #4123" ist KEIN Treffer'), 'der Kollisionsfall gehört wörtlich in den Prompt')
+})
+
+// 15i. Der Budgetcheck steht bewusst VOR der pr-check-Station (Test 15) — aber
+//      er darf den skipped-Zweig nicht mit überholen: ein bereits erledigtes
+//      Issue bekäme sonst budget-exceeded, verlöre agent-ready und machte seine
+//      Abhängigen über deadBlockers dauerhaft blockiert. Für ein Issue, das
+//      fertig ist.
+test('Budget-Abbruch überholt den skipped-Pfad nicht', async () => {
+  const state = { tokens: 0 }
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg({ budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } } }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => {
+      // Der Deckel misst je Einheit ab ihrem eigenen Start — #2 muss deshalb
+      // selbst verbrauchen, sonst wäre die Gegenprobe unten vakuum-grün.
+      if (/^build /.test(c.label)) state.tokens += 5000
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: true, note: 'war schon erledigt' }
+      if (c.label === 'pr-check #1') return { found: true, pr: 91, branch: 'feat/1-x', state: 'MERGED' }
+      return undefined
+    },
+  })
+  const d1 = doneOf(report, 1)
+  assert.equal(d1.skipped, true, 'die gh-belegte Erledigung zählt, nicht der Tokenstand des Builders')
+  assert.equal(d1.budgetExceeded, undefined, 'ein erledigtes Issue hat nichts zu bezahlen, was ein Abbruch retten könnte')
+  none(calls, /^budget-abort #1$/)
+  assert.deepEqual(report.blocked, [], 'der Abhängige darf nicht an einem fertigen Blocker sterben')
+  assert.equal(doneOf(report, 2).issue, 2, 'der Abhängige läuft an')
+  // Gegenprobe: der reguläre Pfad bleibt gedeckelt (Test 15 prüft ihn im
+  // Detail) — hier nur, dass #2 seinerseits sauber abbricht statt durchzulaufen.
+  assert.equal(doneOf(report, 2).budgetExceeded, true, 'ohne skipped greift der Deckel unverändert')
+})
+
 // ---------------------------------------------------------------------------
 // Fortschritts-Circuit-Breaker (Issue #31)
 // ---------------------------------------------------------------------------
@@ -1153,6 +1315,28 @@ test('Gate-Wait: Infra-Diagnose und Re-Run stehen vor der Fix-Runde', async () =
     'ohne Qualifier löst jeder informative Check Diagnose und Re-Run aus')
 })
 
+// 28b. Die Signaturen sind generische Strings, und `--log-failed` enthält die
+//      Ausgabe des gescheiterten Steps im Volltext: als bloßer Teilstring matcht
+//      "operation timed out" auch den Testnamen eines legitim fehlschlagenden
+//      Timeout-Tests. Der Treffer muss deshalb am Step hängen (der Schritt-4-
+//      Befund), nicht am Logauszug — sonst löst ein roter Test einen Re-Run aus
+//      und die Station misst denselben roten Test noch einmal.
+test('Gate-Wait: die Infra-Signatur zählt nur im vorgelagerten Step, nicht in der Testausgabe', async () => {
+  const p = only((await runWorkflow({ units: [unit(1)], config: cfg() })).calls, 'gate-wait #1').prompt
+  assert.ok(/hängt am gescheiterten STEP aus Schritt 4, nie am Volltext des Logs/.test(p),
+    'ohne Step-Kopplung ist der Signaturtreffer allein hinreichend — genau der Fehlalarm')
+  assert.ok(!/ODER der Logauszug enthält eine dieser Signaturen/.test(p),
+    'die ODER-Verknüpfung macht den Signaturtreffer wieder allein hinreichend')
+  assert.ok(/Eine Signatur ALLEIN reicht nie/.test(p), 'die Regel muss explizit dastehen, nicht implizit aus der Reihenfolge folgen')
+  assert.ok(/steht die Signatur in der Ausgabe des Test-\/Lint-\/Review-Aufrufs selbst, ist der Fall INHALTLICH/.test(p),
+    'der Fehlalarm-Fall gehört wörtlich in den Prompt — er ist der einzige, den ein Agent sonst falsch klassifiziert')
+  assert.ok(/Einzige Ausnahme: der Runner bricht mitten im Step weg/.test(p),
+    'ein weggebrochener Runner bleibt Infrastruktur, auch wenn er den Test-Step trifft — sonst kostet er eine Fix-Runde')
+  // Die Signaturen selbst bleiben im Prompt (Test 28 prüft die Liste), sie sind
+  // jetzt nur Beleg FÜR einen Step statt eigenständiger Auslöser.
+  assert.ok(p.includes('ein zusätzlicher Beleg'), 'die Signatur ist Beleg, nicht Auslöser')
+})
+
 // 29. Schema-Kopplung: der Prompt darf infraRerun nur verlangen, wenn das Schema
 //     es auch durchlässt — additionalProperties: false verwürfe es sonst still,
 //     und die Station fiele bei jeder Antwort mit dem Feld technisch aus.
@@ -1304,18 +1488,30 @@ test('Allowlist-Härte: keine Präfix-Regel ohne Wortgrenze, awk nur wörtlich',
 //     prep-Job ist auf draft == false gefiltert) — genau das Urteil, das der
 //     Mensch beim Übernehmen braucht. Das Signal "nicht mergen" wandert deshalb
 //     auf ein Label plus einen Abbruchkommentar, der PR bleibt ready.
+//     Die Einheit trägt bewusst die Kollisionsnummer #41: an dieser Station wird
+//     an einen FREMDEN PR geschrieben, wenn die Treffer-Verifikation zu weich ist
+//     ("Closes #4123" enthält "Closes #41").
 test('needs-human: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', async () => {
   const { calls } = await runWorkflow({
-    units: [unit(1)],
+    units: [unit(41)],
     config: cfg(),
-    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+    respond: (c) => (/^ac-verify(\+\d+)? #41$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
   })
-  const p = only(calls, 'needs-human #1').prompt
+  const p = only(calls, 'needs-human #41').prompt
   assert.ok(/gh pr edit <N> -R acme\/demo --add-label needs-human/.test(p), 'Label am PR fehlt')
   assert.ok(/gh pr comment <N> -R acme\/demo/.test(p), 'Abbruchkommentar am PR fehlt')
   assert.ok(/<!-- flowkit-abort:v1 -->/.test(p), 'Abbruch-Marker fehlt')
-  assert.ok(/Body exakt "Closes #1" enthält/.test(p),
-    'hier wird an einen gefundenen PR geschrieben (Label + Kommentar) — die Treffer-Verifikation gegen den Body ist nicht optional')
+  // Die Verifikationsregel muss dieselbe sein wie in der pr-check-Station:
+  // "Body enthält Closes #41" allein ist für "Closes #4123" erfüllt, und dann
+  // landen Label und Abbruchkommentar auf dem PR einer unbeteiligten Einheit.
+  assert.ok(/rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt/.test(p),
+    'ohne die rechte Begrenzung trifft die Verifikation auch #41XX — hier wird an einen FREMDEN PR geschrieben')
+  assert.ok(p.includes('"Closes #4123" ist KEIN Treffer'),
+    'der Kollisionsfall gehört wörtlich in den Prompt, nicht in eine abstrakte Regel')
+  assert.ok(/MEHR ALS EIN verifizierter Treffer[\s\S]{0,120}NICHTS ändern/.test(p),
+    'bei zwei verifizierten Treffern darf am PR nichts mutiert werden — welcher gemeint ist, ist nicht zu raten')
+  assert.ok(/gh issue comment 41 -R acme\/demo die Mehrdeutigkeit/.test(p),
+    'die Mehrdeutigkeit muss trotzdem irgendwo landen: am Issue, dem einzigen eindeutigen Träger')
   // Regressionsnetz gegen ein Wiedereinführen des Draft-Setzens an dieser
   // Station — bewusst NUR auf diesen einen Prompt eingegrenzt: Issue #34 hat im
   // Gate-Wait-Re-Trigger ein legitimes `gh pr ready ... --undo` eingeführt, eine
@@ -1330,20 +1526,28 @@ test('needs-human: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', asy
 test('Budget-Abbruch: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', async () => {
   const state = { tokens: 0 }
   const { calls } = await runWorkflow({
-    units: [unit(1)],
+    units: [unit(41)],
     config: cfg({ budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } } }),
     budget: { spent: () => state.tokens },
-    respond: (c) => { if (c.label === 'build #1') state.tokens += 5000 },
+    respond: (c) => { if (c.label === 'build #41') state.tokens += 5000 },
   })
-  const p = only(calls, 'budget-abort #1').prompt
+  const p = only(calls, 'budget-abort #41').prompt
   assert.ok(/gh pr edit <N> -R acme\/demo --add-label budget-exceeded/.test(p), 'Label am PR fehlt')
   assert.ok(/gh pr comment <N> -R acme\/demo/.test(p), 'Abbruchkommentar am PR fehlt')
   assert.ok(/<!-- flowkit-abort:v1 -->/.test(p), 'Abbruch-Marker fehlt')
   assert.ok(!/--undo/.test(p), 'der Budget-Abbruch darf den PR nicht mehr per --undo auf Draft setzen')
-  assert.ok(/gh pr list -R acme\/demo --search "Closes #1" --state open/.test(p),
+  assert.ok(/gh pr list -R acme\/demo --search "Closes #41" --state open/.test(p),
     'die PR-Nummer muss weiterhin über gh gesucht werden, nicht aus ${pr} interpoliert')
-  assert.ok(/Body exakt "Closes #1" enthält/.test(p),
-    'hier wird an einen gefundenen PR geschrieben (Label + Kommentar) — die Treffer-Verifikation gegen den Body ist nicht optional')
+  // Identische Regel wie im needs-human-Pfad: beide mutieren einen per
+  // Volltextsuche gefundenen PR, beide laufen auf haiku ohne Schema.
+  assert.ok(/rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt/.test(p),
+    'ohne die rechte Begrenzung trifft die Verifikation auch #41XX — Label und Kommentar landen auf einem fremden PR')
+  assert.ok(p.includes('"Closes #4123" ist KEIN Treffer'),
+    'der Kollisionsfall gehört wörtlich in den Prompt, nicht in eine abstrakte Regel')
+  assert.ok(/MEHR ALS EIN verifizierter Treffer[\s\S]{0,120}NICHTS ändern/.test(p),
+    'bei zwei verifizierten Treffern darf am PR nichts mutiert werden')
+  assert.ok(/gh issue comment 41 -R acme\/demo die Mehrdeutigkeit/.test(p),
+    'die Mehrdeutigkeit muss am Issue gemeldet werden, dem einzigen eindeutigen Träger')
 })
 
 // 38. Bisher löschte `gh pr ready` beim Übernehmen das Abbruch-Signal implizit
@@ -1366,7 +1570,58 @@ test('Merge-Station: Abbruch-Labels am PR blocken den Merge', async () => {
   const p = only(calls, 'gate-merge #1').prompt
   assert.ok(/kein needs-human- und kein budget-exceeded-Label auf dem PR/.test(p), 'Merge-Guard fehlt')
   assert.ok(/gh pr view 101 -R acme\/demo --json labels/.test(p), 'die Prüfung muss den Live-Zustand des PR lesen, nicht Prosa glauben')
-  assert.ok(/Abbruch-Signal[\s\S]{0,200}GATE:/.test(p), 'ein gefundenes Abbruch-Label muss zum GATE-Fehler führen, nicht zum Merge')
+  assert.ok(/Abbruch-Signal[\s\S]{0,240}blocked: "abort-label"/.test(p),
+    'ein gefundenes Abbruch-Label braucht einen schema-gültigen Ausgang — sonst bleibt dem Agenten nur merged: false')
+  assert.ok(/blocked: "conflict"/.test(p), 'derselbe Ausgang fehlt dem semantischen Merge-Konflikt')
+  const s = only(calls, 'gate-merge #1').opts.schema
+  assert.deepEqual(s.properties.blocked.enum, ['none', 'abort-label', 'conflict'],
+    'Prompt und Schema gehören in denselben Commit: additionalProperties: false verwürfe das Feld sonst still')
+  assert.equal(s.properties.blocked.type, 'string')
+  assert.ok(!s.required.includes('blocked'),
+    'blocked bleibt optional — ein Agent, der stattdessen wie bisher wirft, antwortet weiter gültig')
+})
+
+// 39b. Der Prompt verlangte einen GATE:-Wurf für einen Ausgang, den das
+//      GATE_SCHEMA (additionalProperties: false) gar nicht kannte — schema-gültig
+//      blieb nur merged:false, und das routet seit 0.8.0 in die Merge-Diagnose.
+//      Die liest weder Labels noch Mergebarkeit: sie sieht OPEN/grün/fertig und
+//      lässt den Operator "PR ist grün und fertig, es fehlt nur die
+//      Merge-Freigabe" lesen — die Aufforderung, genau den PR von Hand zu
+//      mergen, den ein früherer Lauf gesperrt hat. main war hier robuster.
+test('Merge bewusst nicht ausgeführt: blocked führt zu needs-human, nie zu merge-blocked', async () => {
+  for (const [blocked, wort] of [['abort-label', 'Abbruch-Label'], ['conflict', 'semantischer Merge-Konflikt']]) {
+    const { report, calls } = await runWorkflow({
+      units: [unit(1)],
+      config: cfg(),
+      respond: (c) => (/^gate-merge /.test(c.label)
+        ? { merged: false, blocked, postMerge: 'unmeasured', note: 'Beleg der Station' }
+        : undefined),
+    })
+    const d1 = doneOf(report, 1)
+    assert.equal(d1.needsHuman, true, `blocked=${blocked} muss needs-human sein`)
+    assert.equal(d1.mergeBlocked, undefined, 'ein bewusster Nicht-Merge ist NICHT der extern blockierte Merge')
+    assert.ok(d1.note.startsWith('GATE:'), 'ohne GATE:-Präfix wäre es ein technischer Fehler mit Requeue')
+    assert.ok(d1.note.includes(wort), `der Grund muss im Issue-Kommentar stehen: ${wort}`)
+    assert.ok(d1.note.includes('Beleg der Station'), 'die note der Merge-Station geht nicht verloren')
+    none(calls, /^merge-diag /) // die Diagnose kennt den Grund nicht und würde ihn übermalen
+    none(calls, /^merge-blocked /)
+    only(calls, 'needs-human #1')
+    assert.equal(report.stopped, null, 'ein needs-human hält den Lauf nicht an')
+  }
+})
+
+// 39c. Gegenprobe: blocked ist NICHT die neue Klassifikation für jeden
+//      Nicht-Merge. Der Hauptfall aus #37 (Harness hält die Station an, kein
+//      blocked) muss weiterhin über die Diagnose laufen — sonst hätte der Fix
+//      den merge-blocked-Zustand mit erschlagen.
+test('blocked: "none" ändert nichts — der angehaltene Merge bleibt merge-blocked', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => (/^gate-merge /.test(c.label) ? { merged: false, blocked: 'none', postMerge: 'unmeasured' } : undefined),
+  })
+  assert.equal(doneOf(report, 1).mergeBlocked, true)
+  only(calls, 'merge-diag #1')
 })
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1666,32 @@ test('Merge extern blockiert: gate-merge ohne Ergebnis + grüner PR → merge-bl
   assert.deepEqual(report.failed, [])
   assert.equal(doneOf(report, 2).pr, 102, 'die zweite Einheit muss regulär durchlaufen')
   assert.ok(logs.some((l) => /extern merge-blockiert/.test(l)), 'der Bericht muss "extern blockiert" von "gescheitert" unterscheiden')
+})
+
+// 40b. Formtest des MERGE_STATE_SCHEMA — bis hierher hatte es keinen (vier
+//      Mutationen: required gekürzt, additionalProperties: true, schema am
+//      Aufruf gestrichen, Feld entfernt — alle vakuum-grün). Die Verzweigung in
+//      runUnit liest jedes dieser Felder wörtlich; fehlt eines still, kippt sie
+//      auf die falsche Seite: ohne checksPending gilt ein PR mit drei laufenden
+//      Checks als "grün und fertig" und der Operator mergt ungeprüft von Hand.
+test('MERGE_STATE_SCHEMA: Form des Literals trägt die Verzweigung', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ mergeCheck: 'coordinator' }),
+    respond: (c) => (c.label === 'gate-merge #1' ? null : undefined),
+  })
+  const s = only(calls, 'merge-diag #1').opts.schema
+  assert.ok(s, 'ohne schema am Aufruf antwortet die Diagnose in Prosa — genau das sollte sie ersetzen')
+  assert.equal(s.type, 'object')
+  assert.deepEqual(s.required, ['prState', 'merged', 'checksGreen', 'checksRed', 'checksPending', 'mergeCheckState'],
+    'jedes dieser Felder steht in der merge-blocked-Bedingung; ein fehlendes wäre undefined und die Bedingung falsch')
+  assert.equal(s.additionalProperties, false, 'der Agent darf den PR-Zustand nicht an den Feldern vorbei melden')
+  assert.equal(s.properties.merged.type, 'boolean')
+  for (const f of ['checksGreen', 'checksRed', 'checksPending']) {
+    assert.equal(s.properties[f].type, 'integer', `${f} muss zählbar sein — ein String verglich sich gegen 0 falsch`)
+  }
+  assert.ok(!s.required.includes('note'), 'note bleibt optional; erzwingen ließe sich nur das Feld, nicht sein Inhalt')
+  assert.ok(s.properties.note, 'note muss deklariert sein, sonst verwirft additionalProperties: false den Klartext')
 })
 
 // 41. Ein merge-blockierter PR liegt NICHT auf dem Default-Branch — ein

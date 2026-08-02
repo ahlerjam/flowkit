@@ -171,11 +171,22 @@ statt still ewig zu blockieren.
    ausrichten konnte, ist kein Erfolg (Issue #31). Ein vom Builder gemeldetes
    `skipped` wird nur akzeptiert, wenn gh dazu einen GEMERGTEN PR ausweist;
    meldet gh MERGED, obwohl der Builder gebaut hat, endet die Einheit als
-   Erledigung ohne zweiten Merge-Versuch. Mehrere offene Treffer sind mehrdeutig
-   (nicht raten), CLOSED und ein leerer Branchname sind kein verwertbarer Befund.
-   Die Station läuft NACH dem Budgetcheck: ein Builder, der sein Budget sprengt,
-   hat meist noch keinen PR — sonst würde aus einem sauberen Budget-Abbruch ein
-   technischer Fehler.
+   Erledigung ohne zweiten Merge-Versuch. Weist gh umgekehrt einen OFFENEN PR
+   aus, während der Builder `skipped` meldet (Issue nach dem Merge wiedereröffnet,
+   dazu ein offener PR aus einem früheren Lauf), gilt dieselbe Prioritätsregel
+   wie in der Station selbst — OPEN schlägt MERGED: der offene PR wird übernommen
+   und normal verifiziert, gegatet und gemergt, statt die Einheit zu werfen.
+   Mehrere offene Treffer sind mehrdeutig: das ist KEIN technischer Fehler,
+   sondern ein `needs-human` (Label und Kommentar am Issue, kein zweiter
+   Builder-Lauf) — welcher PR gemergt werden soll, kann nur ein Mensch
+   entscheiden, und die Abbruch-Stationen fassen bei mehr als einem verifizierten
+   Treffer bewusst keinen der PRs an. CLOSED und ein leerer Branchname sind kein
+   verwertbarer Befund. Die Station läuft NACH dem Budgetcheck: ein Builder, der
+   sein Budget sprengt, hat meist noch keinen PR — sonst würde aus einem sauberen
+   Budget-Abbruch ein technischer Fehler. Der Budgetcheck überholt dabei den
+   `skipped`-Zweig NICHT: ein bereits erledigtes Issue bekäme sonst
+   `budget-exceeded`, verlöre `agent-ready` und machte seine Abhängigen dauerhaft
+   blockiert — für Arbeit, die längst gemergt ist.
 4. **AC-Verifier:** frisch, Input nur Issue-Body + PR-Diff, Widerlegungsauftrag,
    Urteil als PR-Kommentar `<!-- ac-verify:v2 -->` — Tabelle plus maschinenlesbarer
    JSON-Block `{"verdicts":[{"ac","met","evidence"}]}`, ein Eintrag je AC.
@@ -196,19 +207,23 @@ statt still ewig zu blockieren.
    (Draft-Toggle); danach wird nicht weiter getriggert, und der PR bleibt in
    jedem Ausgang `ready`. Bei FAILURE des Pflicht-Checks steht ZUERST die
    Diagnose, in welchem Step der Job gescheitert ist (`gh run view --json jobs`
-   plus `--log-failed | tail`): scheitert er VOR dem eigentlichen
+   plus `--log-failed | tail`): liegt dieser Step VOR dem eigentlichen
    Test-/Lint-/Review-Aufruf (Checkout, Setup-Action, Dependency-Installation,
-   Paketdownload, Runner-Provisionierung) oder trägt der Log eine
-   Infrastruktur-Signatur (`operation timed out`, `Failed to download`,
-   `error sending request for url`, `Could not resolve host`,
-   `The runner has received a shutdown signal`, dazu CONFIG.ciInfraSignatures),
-   ist das keine Aussage über den Code: `gh run rerun <RUN_ID> --failed`, dann
+   Paketdownload, Runner-Provisionierung), ist das keine Aussage über den Code: `gh run rerun <RUN_ID> --failed`, dann
    neu werten — ein Re-Run je rotem Lauf, höchstens zwei je Station (`--failed`
-   wirkt pro Lauf, eine Störung trifft meist mehrere Workflows). Dieser Re-Run
-   zählt NICHT auf maxFixRounds und ist auch bei erschöpftem Fix-Budget erlaubt;
-   die 45-Minuten-Grenze gilt unverändert. Scheitert derselbe Step erneut, ist er
-   reproduzierbar und wird inhaltlich behandelt. Erst dann P0/P1 adressieren
-   (Restbudget aus maxFixRounds) — parallele Einheiten warten so nicht auf fremde
+   wirkt pro Lauf, eine Störung trifft meist mehrere Workflows). Die
+   Infrastruktur-Signaturen (`operation timed out`, `Failed to download`,
+   `error sending request for url`, `Could not resolve host`,
+   `The runner has received a shutdown signal`, dazu CONFIG.ciInfraSignatures)
+   sind dabei ein Beleg FÜR EINEN solchen Step, nie für sich allein: der
+   `--log-failed`-Auszug enthält die Testausgabe im Volltext, und ein legitim
+   fehlschlagender Timeout-Test bringt seine eigene `operation timed out`-Zeile
+   mit — im Test-/Lint-/Review-Step ist der Fall deshalb inhaltlich, egal welche
+   Signatur im Log steht. Einzige Ausnahme ist ein weggebrochener Runner. Dieser
+   Re-Run zählt NICHT auf maxFixRounds und ist auch bei erschöpftem Fix-Budget
+   erlaubt; die 45-Minuten-Grenze gilt unverändert. Scheitert derselbe Step
+   erneut, ist er reproduzierbar und wird inhaltlich behandelt. Erst dann P0/P1
+   adressieren (Restbudget aus maxFixRounds) — parallele Einheiten warten so nicht auf fremde
    CI, der Lock serialisiert nur noch das Mergen. Wird es nicht grün, meldet die
    Station `{ green: false, draftAtEntry, runsFound, retriggered, infraRerun,
    note }` statt zu werfen; der Workflow hängt diese Diagnose an die
@@ -218,7 +233,10 @@ statt still ewig zu blockieren.
 7. **Merge** (IM Merge-Lock, serialisiert): Override-Label-, Abbruch-Label-
    (`needs-human`/`budget-exceeded` am PR — Prompt-Guard gegen ein liegen
    gebliebenes Signal eines früheren Laufs, kein serverseitiges Hindernis wie
-   der frühere Draft-Zustand) und malformed-tree-Check,
+   der frühere Draft-Zustand; die Station meldet dafür `blocked: "abort-label"`
+   bzw. `blocked: "conflict"` und der Workflow macht daraus den `GATE:`-Abbruch,
+   damit ein bewusster Nicht-Merge nicht als „PR ist grün und fertig, es fehlt
+   nur die Merge-Freigabe" beim Operator ankommt) und malformed-tree-Check,
    BEHIND-Update inkl. Append-Konflikt-Regel (alles andere → GATE-Stopp),
    erneutes Grün-Warten nach einem BEHIND-Update innerhalb des Locks
    (Zyklus-Cap bleibt), Squash-Merge, unabhängige gh-Verifikation,
@@ -272,9 +290,10 @@ statt still ewig zu blockieren.
 ## Stop-Regeln (Zustandsautomat, Spec §6)
 
 - **Inhaltlicher Gate-Fail** (AC-Verifier/Security/Gate-Wait nach
-  erschöpftem maxFixRounds nicht grün, oder die Merge-Station findet im Lock
-  rote Checks bzw. einen semantischen Konflikt vor — im Lock wird nicht
-  gefixt): die EINHEIT stoppt — Label `needs-human`, dazu am zugehörigen
+  erschöpftem maxFixRounds nicht grün; die Merge-Station findet im Lock rote
+  Checks, ein Abbruch-Label eines früheren Laufs oder einen semantischen Konflikt
+  vor — im Lock wird nicht gefixt; oder gh weist zum Issue mehr als einen offenen
+  PR aus): die EINHEIT stoppt — Label `needs-human`, dazu am zugehörigen
   offenen PR dasselbe Label plus einen Abbruchkommentar (erste Zeile
   `<!-- flowkit-abort:v1 -->`). Der PR bleibt bewusst READY und wird NICHT auf
   Draft gesetzt: die Deep-Review-Pipeline überspringt Drafts, und genau ihr
@@ -298,7 +317,8 @@ statt still ewig zu blockieren.
   --add-label agent-ready`), damit ein späterer Lauf die Einheit erneut aufnimmt.
   Ein resume-Modus greift sie nicht (siehe Scope).
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall, ODER: nach dem Builder ist
-  auf GitHub kein verwertbarer PR zum Issue nachweisbar — siehe Station 3):
+  auf GitHub GAR KEIN verwertbarer PR zum Issue nachweisbar — siehe Station 3;
+  ZWEI offene PRs sind dagegen ein `needs-human`, kein Requeue):
   erster Fehler → Cleanup + Queue-Ende (transient); zweiter technischer Fehler
   derselben Einheit → Lauf stoppt mit Bericht, und zwar mit dem konkreten
   Fehlertext als `stopped.reason`.

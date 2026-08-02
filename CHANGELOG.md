@@ -208,6 +208,55 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   the lock; a parked unit ends as `needs-human` naming the unit whose post-merge
   proof was red. Only a red post-merge halts merges — a breaker or double-fault
   stop still lets a finished, green-verified unit merge.
+- A merge the station deliberately refuses no longer reaches the operator as
+  "the PR is green and finished, only the merge approval is missing" (#35, #37).
+  The merge prompt demanded a `GATE:` throw for an abort label on the PR and for
+  a semantic merge conflict, but `GATE_SCHEMA` (`additionalProperties: false`)
+  had no return value for it — under a forced schema the only valid way out was
+  `merged: false`, which routes into the merge diagnosis, and that station reads
+  neither labels nor mergeability. It saw an open, green, finished PR and asked
+  a human to merge by hand exactly the PR an earlier run had marked as not
+  mergeable. The station now reports `blocked: "abort-label" | "conflict"` and
+  the workflow raises the `GATE:` abort itself, before the diagnosis; a thrown
+  error remains equivalent, and `blocked: "none"` (or a missing field) leaves the
+  `merge-blocked` path untouched.
+- The two abort stations no longer risk labelling and commenting on a foreign
+  PR. Both verified their search hit with "body contains `Closes #<n>`", which
+  is true of `Closes #4123` for issue 41; both run on haiku without a schema and
+  without a JS-side re-check. They now use the same rule as the pr-check station
+  (the match must be bounded on the right by a non-digit or end of line) and, if
+  more than one verified hit remains, mutate nothing on any PR and report the
+  ambiguity on the issue instead. The builder's idempotency search uses the same
+  rule.
+- An ambiguous PR result (two verified open PRs with `Closes #<n>`) is a
+  `needs-human` instead of a technical error (#31). The pr-check station detects
+  the case deliberately, but `runUnit` could not tell it from "no PR at all": the
+  unit was requeued including a second builder run, and the identical second
+  result stopped the whole run with neither label nor comment on the issue. The
+  station now reports `ambiguous: true` (new, optional field in
+  `PRCHECK_SCHEMA`), the runner raises a `GATE:` naming the candidates, and the
+  needs-human station leaves both PRs untouched.
+- Builder and pr-check no longer prioritise MERGED and OPEN against each other
+  (#31, #33). The builder checked for a merged PR first, the station requires
+  OPEN before MERGED. When both states exist — an issue reopened after a merge
+  plus an open PR from a needs-human run — both stations behaved exactly as
+  prompted and the unit threw anyway, without a `GATE:` prefix, so it was
+  requeued and the second attempt reproduced the same constellation and stopped
+  the run. The builder prompt now carries the station's priority rule, and a
+  claimed skip against an open PR takes that PR over instead of throwing.
+- The budget check after the build no longer overtakes the `skipped` path (#31).
+  It was moved in front of the pr-check station on purpose — a builder that
+  blows its budget usually has no PR yet — but that also put it in front of an
+  already-finished issue, which then got `budget-exceeded`, lost `agent-ready`
+  and left its dependents permanently blocked for work that was long since
+  merged.
+- A CI infrastructure signature only counts in a step that runs before the
+  actual test/lint/review invocation (#36). `gh run view --log-failed` prints
+  the failed step's output in full, and `operation timed out` is also the
+  message of a legitimately failing timeout test — as a bare substring match it
+  triggered a rerun that just re-measured the same red test. The signature is
+  now evidence for such a step rather than a trigger of its own; a runner that
+  dies mid-step stays infrastructure.
 - Area serialisation counts in-flight units per area instead of holding a set of
   areas. Two units of one area can legitimately run at once (the fallback in
   `pickNext` allows it when nothing else is runnable); the set released the area
