@@ -1,8 +1,7 @@
 name: flowkit-tests
 
 # Dogfooding: flowkit ships CI templates for OTHER repos (templates/ci/*) but
-# had no CI of its own — this runs the plugin's own 6 test suites plus the
-# critical-path pipeline-step tests (scripts/test-review-pipeline-steps.sh) on
+# had no CI of its own — this runs all 8 of the plugin's own test suites on
 # every PR and every push to main. ubuntu-latest ships node, python3, jq and
 # timeout out of the box, so no setup-* actions are needed.
 
@@ -35,6 +34,9 @@ jobs:
 
       - name: pretooluse-blocker hook
         run: bash templates/hooks/test-pretooluse-blocker.sh
+
+      - name: templates vendor-neutrality
+        run: bash scripts/test-templates-vendor-neutral.sh
 
       - name: review-pipeline-steps (shell-logic of the pr-deep-review template)
         run: bash scripts/test-review-pipeline-steps.sh

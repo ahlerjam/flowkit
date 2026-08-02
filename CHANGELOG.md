@@ -60,6 +60,9 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   are ignored by the same block. The block is rebuilt on every run, so a second
   `/flowkit:setup` produces no duplicate lines. Existing installations are not
   migrated — the guard takes effect the next time `/flowkit:setup` runs. (#39)
+- `scripts/test-templates-vendor-neutral.sh`, wired into CI: keeps `templates/`
+  — copied verbatim into every target repo by `/flowkit:setup` — free of
+  cloud/SaaS provider names. (#40)
 
 ### Changed
 - The merge station's post-merge proof is now three-valued: the gate return
@@ -85,6 +88,16 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   `sort -V` (never a lexical guess — `v1.0.9` looks newer than `v1.0.183` but
   is not), keeps a newer installed pin, and reports which pin ended up
   installed. (#38)
+- The shipped blocker test is provider-neutral: the Hetzner-specific
+  `HCLOUD_TOKEN` case became `MY_TOKEN`, and every keyword of the hook's secret
+  alternation (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `APIKEY`) now has its
+  own `must_block` case — previously only `TOKEN` and `API_KEY` did. A
+  completeness probe (template mode only, so it does not penalize a repo's own
+  hardening of its installed hook) derives the keyword list from the hook
+  under test and fails when a branch has no `MY_<KEYWORD>=` case, so new
+  alternation branches cannot stay untested. The installed hook's comment also
+  lost its dangling reference to a source document that never shipped with
+  flowkit. Regex behaviour is unchanged. (#40)
 
 ### Fixed
 - Post-merge proof no longer treats a cancelled CI run as a failure (#32). The

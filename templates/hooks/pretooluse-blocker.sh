@@ -20,8 +20,10 @@ REGEX="$REGEX|gh[^|;&]*--admin"
 REGEX="$REGEX|gh[[:space:]]+api[^|;&]*(-X|--method)[[:space:]]*=?[[:space:]]*(DELETE|PATCH|POST|PUT)"
 REGEX="$REGEX|gh[[:space:]]+api[^|;&]*[[:space:]](-[fF]|--field|--raw-field|--input)([[:space:]=]|$)|gh[[:space:]]+api[^|;&]*[[:space:]]-[fF][^|;&[:space:]]"
 REGEX="$REGEX|gh[[:space:]]+(pr|issue)[[:space:]]+edit[^|;&]*--add-label[^A-Za-z0-9]+${OVERRIDE_LABEL}"
-# Generalisierte Secret-Erkennung (Quelle hatte nur HCLOUD_TOKEN — quelle-hooks-settings.md §4.4
-# fordert Generalisierung, nicht Entfernung): Inline-Zuweisung eines Secret-artigen Werts.
+# Generalisierte, anbieterneutrale Secret-Erkennung: Inline-Zuweisung eines
+# Secret-artigen Werts (>= 16 Zeichen ohne Whitespace) an einen Bezeichner, der
+# eines der Schlüsselwörter der Alternation enthält. Wird die Alternation
+# erweitert, verlangt test-pretooluse-blocker.sh einen passenden Testfall.
 REGEX="$REGEX|[A-Za-z_]*(TOKEN|SECRET|PASSWORD|API_KEY|APIKEY)[A-Za-z_]*=[^[:space:]]{16,}"
 
 printf '%s' "$cmd" | grep -iqE "$REGEX" \
