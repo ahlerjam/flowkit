@@ -159,7 +159,23 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   (`gh pr view --json isDraft,headRefOid`, then `gh pr ready` — the deep-review
   pipeline skips drafts by design, so the required check comes back SKIPPED
   instead of SUCCESS), counts the workflow runs on the PR's own head SHA when gh
-  reports "no checks reported" and re-triggers exactly once. A station that does
+  reports "no checks reported" and re-triggers exactly once. That re-trigger is a
+  real BEHIND update — `git merge origin/<default branch>` in its own worktree,
+  pushed — because that is the only measure that actually starts a run: on the
+  two PRs of the incident, `gh pr ready` produced no Actions run at all and an
+  empty commit produced none either, while the update had the pipeline running
+  within seconds. A draft toggle and `git commit --allow-empty` are therefore
+  ruled out in the prompt, as is `gh run rerun` (there is no run to repeat). The
+  update runs outside the merge lock, which is safe because it writes to the
+  unit's feature branch, never to the default branch, and the merge station
+  re-checks BEHIND later anyway — but it follows that station's conflict rule to
+  the letter: only a pure append conflict is resolved, anything else is
+  `git merge --abort` with nothing pushed and the conflicting files in the note.
+  If the branch already contains the default branch the merge would be a no-op
+  that pushes nothing, so nothing is triggered and the finding is reported
+  instead; after a successful update the run count is measured against the new
+  head SHA. The draft *check* stays: a draft PR cannot get a green required
+  check, so establishing that still comes before any waiting. A station that does
   not go green now returns `{ green: false, draftAtEntry, runsFound,
   retriggered, note }` instead of throwing, the resulting `GATE:` message names
   all three, and the needs-human comment repeats the reason verbatim instead of

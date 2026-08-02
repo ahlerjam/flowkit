@@ -378,8 +378,10 @@ test('Gate-Wait: Draft-Check und gh pr ready stehen vor der Warteschleife', asyn
   const iWatch = p.indexOf('--watch')
   assert.ok(iWatch > -1, 'ohne die Warteschleife misst der Reihenfolge-Test nichts')
   assert.ok(iDraft > -1 && iDraft < iWatch, 'der Draft-Check steht VOR dem --watch, sonst wartet die Station wieder ins Leere')
-  // Nicht nur "kommt vor": das gh pr ready aus dem Re-Trigger (Schritt 3) steht
-  // hinter der Warteschleife und käme 45 Minuten zu spät.
+  // Nicht nur "kommt vor": ein gh pr ready HINTER der Warteschleife käme 45
+  // Minuten zu spät. Seit der Re-Trigger das BEHIND-Update ist (Schritt 3a), ist
+  // Schritt 1 die einzige Stelle, die den PR überhaupt ready setzt — die
+  // Reihenfolge ist damit alles, was diesen Aufruf wirksam macht.
   assert.ok(iReady > -1 && iReady < iWatch, 'ein Draft muss VOR dem Warten geheilt werden, nicht nur festgestellt')
 })
 
@@ -393,7 +395,6 @@ test('Gate-Wait: zählt Läufe am HEAD-SHA, triggert genau einmal neu, Schema tr
   assert.ok(/gh run list -R acme\/demo --branch feat\/1-x/.test(c.prompt), 'ohne Lauf-Zählung bleibt "keine Checks" unbelegt')
   assert.ok(c.prompt.includes('headSha == <headRefOid'),
     'ungefiltert zählt jeder fremde Lauf desselben Branch mit — runsFound wäre in Multi-Workflow-Repos immer > 0 und der Re-Trigger tot')
-  assert.ok(/gh pr ready 101 --undo -R acme\/demo/.test(c.prompt), 'der Draft-Toggle ist der Re-Trigger')
   assert.ok(/GENAU EINEN Re-Trigger/.test(c.prompt), 'eine externe Ursache heilt auch der zweite nicht')
   const s = c.opts.schema
   assert.deepEqual(s.required, ['green'], 'Diagnosefelder dürfen NICHT required werden — eine Antwort ohne sie bleibt gültig')
@@ -401,6 +402,45 @@ test('Gate-Wait: zählt Läufe am HEAD-SHA, triggert genau einmal neu, Schema tr
   for (const f of ['draftAtEntry', 'runsFound', 'retriggered']) {
     assert.ok(s.properties[f], `WAIT_SCHEMA.properties.${f} fehlt — additionalProperties: false verwürfe das Feld stillschweigend`)
   }
+})
+
+// 8c2. Welcher Re-Trigger — das offene Akzeptanzkriterium von Issue #34. Der
+//      Operator hat die drei Kandidaten am 2026-08-01 live an PR #576/#580
+//      durchgemessen: `gh pr ready` (Draft aufheben) — keine Actions-Läufe; ein
+//      leerer Commit plus Push — keine Läufe; `git merge origin/main` plus Push —
+//      Läufe binnen Sekunden. Umgesetzt war bis hierher genau der als wirkungslos
+//      belegte Draft-Toggle, während das BEHIND-Update nur im gateMergePrompt
+//      stand — also erst NACH grünem Gate-Wait im Merge-Lock und damit strukturell
+//      zu spät für ein "no checks reported".
+//      Zweite Hälfte des Tests: das Update läuft OHNE Merge-Lock, pusht aber
+//      dasselbe Merge-Ergebnis wie die Merge-Station. Seine Konflikt-Regel darf
+//      deshalb nicht weicher sein als deren — sonst landet über den ungelockten
+//      Weg ein geratener Konflikt auf dem Branch, den der gelockte Weg bewusst
+//      abbricht.
+test('Gate-Wait: Re-Trigger ist das BEHIND-Update, nicht Draft-Toggle oder leerer Commit', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const p = only(calls, 'gate-wait #1').prompt
+  assert.ok(/git merge origin\/main/.test(p), 'ohne das BEHIND-Update hat die Station keinen wirksamen Re-Trigger')
+  assert.ok(/git worktree add <tmp> feat\/1-x/.test(p), 'das Update gehört in einen eigenen Worktree, nie in den Haupt-Tree')
+  assert.ok(/git push/.test(p), 'ohne Push erreicht das Update GitHub nie und triggert nichts')
+  assert.ok(!/--undo/.test(p), 'der Draft-Toggle ist als Re-Trigger live widerlegt — er darf hier nicht zurückkommen')
+  assert.ok(/KEIN leerer Commit/.test(p), 'der leere Commit ist gemessen wirkungslos und muss ausdrücklich ausgeschlossen bleiben')
+  // Ein Merge, der nichts zu mergen hat, pusht nichts und triggert nichts — die
+  // Station meldete sonst retriggered: true für einen No-op.
+  assert.ok(/git merge-base --is-ancestor origin\/main origin\/feat\/1-x/.test(p),
+    'ohne die Vorprüfung meldet die Station einen Re-Trigger, der als No-op gar nichts gepusht hat')
+  // Der HEAD-SHA ist nach dem Update ein anderer; ohne Neubestimmung zählt die
+  // Station runsFound weiter gegen den alten SHA und sähe die neuen Läufe nie.
+  assert.ok(/--json headRefOid neu/.test(p), 'nach dem Update muss der HEAD-SHA neu bestimmt werden')
+  const gm = only(calls, 'gate-merge #1').prompt
+  for (const rule of ['--diff-filter=U', 'git merge --abort', 'HINZUGEFÜGT']) {
+    assert.ok(gm.includes(rule), `Aufbau gepinnt: die Merge-Station kennt "${rule}" nicht mehr`)
+    assert.ok(p.includes(rule), `der ungelockte Gate-Wait pusht dasselbe Merge-Ergebnis, kennt aber "${rule}" nicht — er wäre weniger vorsichtig als der Lock`)
+  }
+  // Schema und Prompt gehören in denselben Commit: die Beschreibung ist das
+  // Einzige, was der Station sagt, wofür retriggered steht.
+  assert.ok(/BEHIND-Update/.test(only(calls, 'gate-wait #1').opts.schema.properties.retriggered.description),
+    'WAIT_SCHEMA beschreibt retriggered noch als Draft-Toggle')
 })
 
 // 8d. Der Nutzen der Felder entsteht erst in der Meldung: sie ist der einzige
@@ -419,7 +459,9 @@ test('Gate-Wait ohne Grün: die GATE-Meldung nennt Draft-Zustand, Lauf-Zahl und 
   assert.ok(/keine Checks nach 45 Minuten/.test(d1.note), 'die note der Station bleibt erhalten')
   assert.ok(/Draft beim Eintritt: ja/.test(d1.note))
   assert.ok(/Workflow-Läufe auf dem Branch: 0/.test(d1.note))
-  assert.ok(/Re-Trigger: ausgeführt/.test(d1.note))
+  // Nicht nur "ausgeführt": WELCHER Re-Trigger lief, entscheidet, was der
+  // Operator als Nächstes tut — ein BEHIND-Update hat den Branch verändert.
+  assert.ok(/Re-Trigger \(BEHIND-Update\): ausgeführt/.test(d1.note))
   const nh = only(calls, 'needs-human #1').prompt
   assert.ok(/Workflow-Läufe auf dem Branch: 0/.test(nh), 'der Befund muss im Issue-Kommentar landen, nicht nur im Report')
   assert.ok(/WÖRTLICH/.test(nh), 'ohne die Wörtlich-Regel paraphrasiert der Haiku-Agent die Diagnose weg')
@@ -438,7 +480,7 @@ test('Gate-Wait ohne Diagnosefelder: die Meldung sagt "unbekannt", nie undefined
   const note = doneOf(report, 1).note
   assert.ok(/Draft beim Eintritt: unbekannt/.test(note))
   assert.ok(/Workflow-Läufe auf dem Branch: unbekannt/.test(note))
-  assert.ok(/Re-Trigger: unbekannt/.test(note))
+  assert.ok(/Re-Trigger \(BEHIND-Update\): unbekannt/.test(note))
   assert.ok(!/undefined/.test(note), 'ein fehlendes Feld darf nie als "undefined" beim Operator landen')
 })
 
@@ -1513,9 +1555,9 @@ test('needs-human: Label + Abbruchkommentar am PR statt Draft-Rücksetzung', asy
   assert.ok(/gh issue comment 41 -R acme\/demo die Mehrdeutigkeit/.test(p),
     'die Mehrdeutigkeit muss trotzdem irgendwo landen: am Issue, dem einzigen eindeutigen Träger')
   // Regressionsnetz gegen ein Wiedereinführen des Draft-Setzens an dieser
-  // Station — bewusst NUR auf diesen einen Prompt eingegrenzt: Issue #34 hat im
-  // Gate-Wait-Re-Trigger ein legitimes `gh pr ready ... --undo` eingeführt, eine
-  // laufweite Prüfung wäre dort falsch-positiv.
+  // Station. Seit der Gate-Wait-Re-Trigger das BEHIND-Update ist (Issue #34,
+  // live gemessen), hat kein Prompt des Workflows mehr ein `--undo`; Test 8c2
+  // hält die Gate-Wait-Seite derselben Regel.
   assert.ok(!/--undo/.test(p), 'der needs-human-Prompt darf den PR nicht mehr per --undo auf Draft setzen')
 })
 

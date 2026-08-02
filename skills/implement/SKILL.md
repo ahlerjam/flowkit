@@ -203,9 +203,21 @@ statt still ewig zu blockieren.
    übersprungener Job den Required Check erfüllt). Meldet gh „no checks
    reported", zählt die Station die Workflow-Läufe auf dem **HEAD-SHA des PR**
    (`gh run list --branch`, gefiltert auf `headSha` — ungefiltert wäre die Zahl
-   in jedem Multi-Workflow-Repo immer > 0) und löst GENAU EINEN Re-Trigger aus
-   (Draft-Toggle); danach wird nicht weiter getriggert, und der PR bleibt in
-   jedem Ausgang `ready`. Bei FAILURE des Pflicht-Checks steht ZUERST die
+   in jedem Multi-Workflow-Repo immer > 0) und löst GENAU EINEN Re-Trigger aus:
+   ein **BEHIND-Update** (`git merge origin/<Default-Branch>` im eigenen
+   Worktree, gepusht). Am Vorfall aus #34 wurde live gemessen, dass `gh pr ready`
+   und ein leerer Commit KEINEN Actions-Lauf auslösen, das Update dagegen binnen
+   Sekunden — Draft-Toggle und `git commit --allow-empty` sind deshalb
+   ausgeschlossen, ebenso `gh run rerun` (es gibt keinen Lauf, den man
+   wiederholen könnte). Enthält der Branch den Default-Branch schon, wäre der
+   Merge ein No-op: dann wird nicht getriggert, sondern gemeldet. Nach dem Update
+   zählt die Station gegen den NEUEN HEAD-SHA. Das Update läuft OHNE Merge-Lock;
+   das ist tragbar, weil es auf den Feature-Branch schreibt, nie auf den
+   Default-Branch, und die Merge-Station BEHIND später ohnehin erneut prüft. Es
+   gilt aber dieselbe Konflikt-Regel wie dort: nur reine Append-Konflikte werden
+   aufgelöst, alles andere `git merge --abort`, kein Push, Befund in die `note`.
+   Danach wird nicht weiter getriggert, und der PR bleibt in jedem Ausgang
+   `ready`. Bei FAILURE des Pflicht-Checks steht ZUERST die
    Diagnose, in welchem Step der Job gescheitert ist (`gh run view --json jobs`
    plus `--log-failed | tail`): liegt dieser Step VOR dem eigentlichen
    Test-/Lint-/Review-Aufruf (Checkout, Setup-Action, Dependency-Installation,
