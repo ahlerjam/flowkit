@@ -1073,7 +1073,44 @@ test('Allowlist-Kohärenz: gh run rerun und tail sind im settings-Template erlau
   // Die Permission-Prüfung zerlegt Pipelines: `| tail` prompted genauso wie das
   // gh-Kommando davor.
   assert.ok(/\| tail -n/.test(p), 'der Logauszug läuft über eine tail-Pipe')
-  assert.ok(/"Bash\(tail\*?\)"/.test(tpl), 'settings.json.template erlaubt kein tail')
+  assert.ok(/"Bash\(tail \*\)"/.test(tpl), 'settings.json.template erlaubt kein tail')
+})
+
+// 35b. Gegenrichtung zu 35: eine Allow-Regel darf nicht MEHR erlauben als der
+//      Prompt braucht. Allow-Regeln sind Präfix-Matches je Teilbefehl — ohne
+//      Leerzeichen vor dem `*` fehlt die Wortgrenze (`Bash(tail*)` deckt auch
+//      `tailscale …` ab), und bei einem Interpreter mit freiem Argument fällt
+//      die Allowlist als Ganzes: `awk 'BEGIN{system("…")}'` führt jeden Befehl
+//      aus. Der einzige reale awk-Bedarf ist der malformed-tree-Check, deshalb
+//      steht awk nur wörtlich in der Liste.
+test('Allowlist-Härte: keine Präfix-Regel ohne Wortgrenze, awk nur wörtlich', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  // {{STACK_ALLOW}} steht als nackter Platzhalter im Template (deshalb ist es
+  // selbst kein valides JSON); mit einem Beispieleintrag dafür muss der Rest
+  // parsebar sein — sonst installiert setup.md ein kaputtes settings.json.
+  const parsed = JSON.parse(tpl.replace('{{STACK_ALLOW}}', '"Bash(uv run *)"'))
+  const rules = parsed.permissions.allow
+    .filter((r) => r.startsWith('Bash(')).map((r) => r.slice(5, -1))
+  assert.ok(rules.length > 20, `Allow-Regeln nicht gefunden (${rules.length})`)
+  for (const r of rules) {
+    assert.ok(!/^[^\s]*[^\s*]\*/.test(r),
+      `Allow-Regel "Bash(${r})" klebt das * an den Befehlsnamen: ohne Leerzeichen davor fehlt die Wortgrenze und ein fremder Befehl mit demselben Präfix ist mit erlaubt (tail* → tailscale)`)
+  }
+  for (const r of rules) {
+    // Programmtext-Interpreter: das erste Argument IST der Code, jedes `*` darin
+    // ist gleichbedeutend mit `Bash(*)`. Nur wörtliche Regeln zulässig.
+    assert.ok(!/^(awk|gawk|mawk|sed)([\s'"]|$)/.test(r) || !r.includes('*'),
+      `Allow-Regel "Bash(${r})" gibt einen Programmtext-Interpreter mit Platzhalter frei — awk 'BEGIN{system("…")}' führt damit jeden Befehl aus`)
+    // Skript-Interpreter: ein Pfadpräfix grenzt ein, ein `*` direkt hinter dem
+    // Interpreter nicht.
+    assert.ok(!/^(sh|bash|zsh|ksh|dash|python[0-9.]*|perl|ruby|node|env|xargs)[\s]+\*/.test(r),
+      `Allow-Regel "Bash(${r})" gibt einen Interpreter mit freiem ersten Argument frei — damit ist jeder Befehl erlaubt`)
+  }
+  const p = only((await runWorkflow({ units: [unit(1)], config: cfg() })).calls, 'gate-merge #1').prompt
+  const awkCall = (p.match(/awk '[^']*'/) || [])[0]
+  assert.ok(awkCall, 'der malformed-tree-Check im gate-merge-Prompt ruft kein awk mehr auf')
+  assert.ok(tpl.includes(`"Bash(${awkCall})"`),
+    `settings.json.template deckt den einzigen awk-Aufruf des Prompts (${awkCall}) nicht wörtlich ab`)
 })
 
 // ---------------------------------------------------------------------------

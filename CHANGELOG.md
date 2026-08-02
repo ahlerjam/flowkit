@@ -113,13 +113,31 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   alternation branches cannot stay untested. The installed hook's comment also
   lost its dangling reference to a source document that never shipped with
   flowkit. Regex behaviour is unchanged. (#40)
+- The blocker hook now also refuses interpreter escapes, the class that turns a
+  single allowlist entry into a blanket approval: `awk` reaching a shell
+  (`system(…)`, `| "sh"`, `| getline`), a pipe into `sh`/`bash`/`zsh`/`ksh`/`dash`
+  (`curl … | sh`), a download piped into `python`/`perl`/`ruby`/`node`, and an
+  absolute interpreter path that traverses out of its directory
+  (`bash /…/scripts/../../x.sh`) — the shape that would slip past the
+  `Bash(bash <plugin>/scripts/*)` prefix rule. Every rule has both a blocking
+  and a non-blocking test case, so the pipelines the runner itself uses
+  (`… | awk '{print $4}' | sort | uniq -d`, `… | tail -n 300`) keep running.
+  (#31)
 - Existing installations need one more `/flowkit:setup` run to pick up
   0.8.0: the new `merge-blocked` label, every allowlist entry added this
   release (plugin script paths, `gh pr edit`, `gh run rerun`,
   `git check-ignore`, `git merge-base`, `git revert`,
-  `tail`/`head`/`awk`/`sort`/`uniq`) and the changed hook templates only
-  reach a repo that way — there is no migration mechanism for
-  `.claude/settings.json` beyond the merge rule setup step 5 already has.
+  `tail`/`head`/`sort`/`uniq` and one literal `awk '{print $4}'`) and the
+  changed hook templates only reach a repo that way — there is no migration
+  mechanism for `.claude/settings.json` beyond the merge rule setup step 5
+  already has.
+- Allow rules for plain commands carry a word boundary (`Bash(tail *)`, not
+  `Bash(tail*)`, which also covers `tailscale …`), and `awk` is allowed only as
+  the one literal call the merge station's malformed-tree check makes. A prefix
+  rule on a program-text interpreter is not a narrow permission at all:
+  `Bash(awk *)` approves `awk 'BEGIN{system("…")}'`, and with it every command,
+  in an unattended run that reads untrusted issue and PR text. A test now fails
+  the build for either shape.
 
 ### Fixed
 - Post-merge proof no longer treats a cancelled CI run as a failure (#32). The
