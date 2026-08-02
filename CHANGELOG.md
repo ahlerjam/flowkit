@@ -8,6 +8,8 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-01
+
 ### Added
 - `pr-check` station: right after the builder the runner asks GitHub itself
   (`gh pr list --search "Closes #<n>" --state all`) and takes PR number, branch
@@ -98,6 +100,13 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   alternation branches cannot stay untested. The installed hook's comment also
   lost its dangling reference to a source document that never shipped with
   flowkit. Regex behaviour is unchanged. (#40)
+- Existing installations need one more `/flowkit:setup` run to pick up
+  0.8.0: the new `merge-blocked` label, every allowlist entry added this
+  release (plugin script paths, `gh pr edit`, `gh run rerun`,
+  `git check-ignore`, `git merge-base`, `git revert`,
+  `tail`/`head`/`awk`/`sort`/`uniq`) and the changed hook templates only
+  reach a repo that way — there is no migration mechanism for
+  `.claude/settings.json` beyond the merge rule setup step 5 already has.
 
 ### Fixed
 - Post-merge proof no longer treats a cancelled CI run as a failure (#32). The
