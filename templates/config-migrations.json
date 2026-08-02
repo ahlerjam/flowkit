@@ -22,5 +22,17 @@
     "field": "runBudgetFactor",
     "default": 1.2,
     "note": "Reserve-Faktor des Lauf-Gesamtdeckels bei parallelism > 1 (Deckel = Σ Einheiten-Budgets × Faktor). Bei parallelism 1 wirkungslos. Muss eine positive Zahl sein — ein String bricht den Lauf sofort ab, statt den Deckel still zu deaktivieren."
+  },
+  {
+    "version": "0.8.0",
+    "field": "progressStopAfter",
+    "default": 3,
+    "note": "Fortschritts-Circuit-Breaker: der Lauf hält an, wenn so viele Einheiten IN FOLGE ohne Merge enden (needs-human, Budget-Abbruch, extern blockierter Merge, technischer Fehler). Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück. 0 schaltet ihn ab — nur bewusst setzen, dann kann ein Lauf wieder die komplette Queue erfolglos durcharbeiten (Issue #31)."
+  },
+  {
+    "version": "0.8.0",
+    "field": "ciInfraSignatures",
+    "default": [],
+    "note": "Zusätzliche Logsignaturen für die Infrastruktur-Erkennung der Gate-Wait-Station (`gh run rerun --failed` statt einer Fix-Runde). Die fünf Standard-Signaturen sind eingebaut — hier nur repo-eigene ergänzen, leeres Array ist der Normalfall. Beim Update zusätzlich prüfen, dass `.claude/settings.json` in permissions.allow `Bash(gh run rerun*)` und `Bash(tail *)` enthält (das Leerzeichen vor dem `*` gehört dazu — es erzwingt eine Wortgrenze, damit die Regel nicht auch `tailscale …` freigibt) (Schritt 5 mergt beide aus dem Template) — sonst blockiert der Permission-Prompt Diagnose und Re-Run im unbeaufsichtigten Lauf (Issue #36)."
   }
 ]

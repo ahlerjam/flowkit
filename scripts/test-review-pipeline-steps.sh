@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Testet die kritischen Bash-Blöcke aus templates/ci/pr-deep-review.yml.template
-# lokal, komplett ohne Netzzugriff und ohne echten GitHub-Actions-Lauf.
+# und commands/setup.md lokal, komplett ohne Netzzugriff und ohne echten
+# GitHub-Actions-Lauf.
 #
 # EHRLICHER SCOPE: Dies ersetzt KEIN echtes Actions-E2E (das steht noch aus —
 # Artifact-Up-/Downloads, echte GitHub-Events, Merge-/Race-Verhalten und die
@@ -25,6 +26,22 @@
 #   (d) Review-Cache-Check (Job "prep", Step "id: cache"): Block wörtlich
 #       extrahiert, mit gestubbtem `gh` (liefert eine Sticky-Comment-Fixture)
 #       und dem echten cache_check.py ausgeführt.
+#   (e) Action-Pin-Registry: jede echte `- uses: anthropics/claude-code-
+#       action@<SHA>`-Zeile im Template muss ZEICHENGLEICH dem kanonischen
+#       Pin entsprechen — SHA UND Versionskommentar, reiner Textvergleich,
+#       kein Netz. Ein zweiter, unabhängiger Grep prüft zusätzlich auf
+#       beweglich gepinnte Referenzen (`@v1`, `@main`, …); er verankert
+#       genauso wenig auf dem Wartungs-Kommentar am Dateianfang wie die
+#       Registry-Prüfung selbst, weil beide ein Muster suchen, das eine reine
+#       Prosa-Erwähnung nicht erfüllt.
+#   (f) Downgrade-Schutz aus commands/setup.md: die beiden Blöcke zwischen
+#       den Markern `# flowkit:action-pin-guard` (Entscheidung) und
+#       `# flowkit:action-pin-restore` (Reparatur) werden WÖRTLICH
+#       extrahiert und gegen Fixtures ausgeführt — sowohl die Entscheidung
+#       (fehlende Datei / kein SHA-Pin / älter / gleich / neuer) als auch,
+#       im "neuer"-Fall, der tatsächliche Rückschreib-`sed`. Gleiche Logik
+#       wie (a): es kann nicht wegdriften, weil exakt der ausgelieferte Text
+#       läuft.
 #
 # Aufruf: bash scripts/test-review-pipeline-steps.sh
 set -u
@@ -397,6 +414,142 @@ print(json.dumps([{'body': body}]))
     run_cache_block "$STALE_COMMENTS_JSON"
     if printf '%s' "$CACHE_GITHUB_OUTPUT" | grep -qF "cache_hit=false"; then ok
     else ko "(d-STALE) Hash-Mismatch muss cache_hit=false ergeben, bekam GITHUB_OUTPUT='$CACHE_GITHUB_OUTPUT'"; fi
+  fi
+fi
+
+echo
+echo "== (e) claude-code-action-Pin (Registry) =="
+# Kanonischer Soll-Pin. Zusammen mit den uses:-Zeilen im Template die
+# einzigen Stellen, an denen die Version steht — zwei Stellen sind Absicht:
+# ein halbfertiger Bump fällt hier auf, statt 46 Patch-Versionen lang
+# unbemerkt zu bleiben (#38).
+#
+# BUMP-ANLEITUNG (immer BEIDE Schritte, sonst färbt CI rot):
+#   1. Neuesten Tag ermitteln und auf einen Commit-SHA auflösen:
+#        gh api --paginate repos/anthropics/claude-code-action/tags --jq '.[].name' \
+#          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+#        gh api repos/anthropics/claude-code-action/commits/<vX.Y.Z> --jq .sha
+#      (Die GitHub-"latest release" ist der bewegliche v1-Zeiger, keine
+#      Patch-Version — immer die Tag-Liste nutzen.)
+#   2. ALLE FÜNF `uses: anthropics/claude-code-action@…`-Zeilen in
+#      templates/ci/pr-deep-review.yml.template UND die beiden Konstanten
+#      unten (EXPECTED_PIN_SHA / EXPECTED_PIN_VERSION) ersetzen — beide,
+#      sonst wird genau dieser Test rot statt still zu verrotten.
+#   3. Schnittstelle prüfen, bevor gemergt wird:
+#        gh api "repos/anthropics/claude-code-action/contents/action.yml?ref=<vX.Y.Z>" \
+#          --jq .content | base64 -d
+#      Diese Datei nutzt die Inputs claude_code_oauth_token,
+#      path_to_bun_executable, track_progress, prompt, claude_args sowie den
+#      Output structured_output — Änderungen dort brauchen mehr als einen
+#      Pin-Bump.
+EXPECTED_PIN_SHA="be7b93b1907a4abad570368f3c74b6fe3807510b"
+EXPECTED_PIN_VERSION="v1.0.183"
+EXPECTED_PIN_LINE="- uses: anthropics/claude-code-action@${EXPECTED_PIN_SHA} # ${EXPECTED_PIN_VERSION}"
+
+# Erste Prüfung: nur echte SHA-Pins zählen (40-stelliges Hex direkt nach dem
+# @). Ein Wartungs-Kommentar, der das WORT "claude-code-action" nennt, aber
+# keinen SHA dahinter hat, kann dieses Muster nicht treffen — ein früherer
+# Entwurf dieses Tests grep'te ohne SHA-Anforderung und wurde dadurch selbst
+# nach einem korrekten Bump dauerhaft rot (#38-Kritik).
+pin_hits="$(grep -nE 'anthropics/claude-code-action@[0-9a-f]{40}' "$TEMPLATE" || true)"
+if [ -z "$pin_hits" ]; then
+  ko "(e) keine einzige SHA-gepinnte 'anthropics/claude-code-action@'-Zeile im Template gefunden — die Prüfung wäre gegenstandslos (umbenannt? entfernt?)"
+else
+  # WICHTIG: heredoc statt Pipe — in einer Pipe liefe die Schleife in einer
+  # Subshell und pass/fail gingen verloren.
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    pin_lineno="${hit%%:*}"
+    pin_text="$(printf '%s' "${hit#*:}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ "$pin_text" = "$EXPECTED_PIN_LINE" ]; then ok
+    else ko "(e) Zeile $pin_lineno weicht ab: '$pin_text' != Soll '$EXPECTED_PIN_LINE'"; fi
+  done <<PINS
+$pin_hits
+PINS
+fi
+
+# Zweite, unabhängige Prüfung: ein beweglich gepinntes Tag (@v1, @main, …)
+# würde das SHA-Muster oben nie treffen und liefe deshalb unbemerkt durch,
+# säße es an einer der fünf Stellen. Eigener Grep, damit (e) beide im Issue
+# #38 genannten Fehlerbilder fängt — auseinanderlaufende SHA-Pins UND einen
+# Rückfall auf ein bewegliches Tag — ohne wieder den Wartungs-Kommentar am
+# Dateianfang mitzuerfassen (der nennt weder "@v1" noch "@main" o. Ä.).
+moving_hits="$(grep -nE 'anthropics/claude-code-action@(v[0-9]|main|master|latest)' "$TEMPLATE" || true)"
+if [ -n "$moving_hits" ]; then
+  ko "(e) bewegliches claude-code-action-Tag gefunden (SHA-Pin gefordert): $(printf '%s' "$moving_hits" | tr '\n' ';')"
+else
+  ok
+fi
+
+echo
+echo "== (f) Downgrade-Schutz für den claude-code-action-Pin (commands/setup.md) =="
+SETUP_MD="$ROOT/commands/setup.md"
+if [ ! -f "$SETUP_MD" ]; then
+  ko "(f) commands/setup.md nicht gefunden: $SETUP_MD"
+else
+  GUARD="$WORK/action-pin-guard.sh"
+  RESTORE="$WORK/action-pin-restore.sh"
+  awk '/# flowkit:action-pin-guard \(Beginn\)/{f=1} f{print} f && /# flowkit:action-pin-guard \(Ende\)/{exit}' "$SETUP_MD" > "$GUARD" 2>/dev/null
+  awk '/# flowkit:action-pin-restore \(Beginn\)/{f=1} f{print} f && /# flowkit:action-pin-restore \(Ende\)/{exit}' "$SETUP_MD" > "$RESTORE" 2>/dev/null
+
+  if ! grep -q 'flowkit:action-pin-guard (Ende)' "$GUARD" 2>/dev/null; then
+    ko "(f) Guard-Block (Entscheidung) in commands/setup.md nicht gefunden (Marker fehlen) — der Downgrade-Schutz ist nicht ausgeliefert"
+  elif ! grep -q 'flowkit:action-pin-restore (Ende)' "$RESTORE" 2>/dev/null; then
+    ko "(f) Restore-Block (Reparatur) in commands/setup.md nicht gefunden (Marker fehlen) — Teil 2 des Downgrade-Schutzes ist nicht ausgeliefert"
+  else
+    mk_wf() { printf '      - uses: anthropics/claude-code-action@%s # %s\n' "$2" "$3" > "$1"; }
+    run_guard() {
+      PIN_TEMPLATE="$TEMPLATE" PIN_INSTALLED="${1:-$WORK/gibt-es-nicht.yml}" bash "$GUARD" 2>/dev/null
+    }
+    check_guard() { # <label> <installed|""> <erwartete decision> [erwartetes keep_sha]
+      local label="$1" file="$2" want="$3" want_sha="${4:-}" out got sha
+      out="$(run_guard "$file")"
+      got="$(printf '%s\n' "$out" | grep -m1 '^pin_decision=' | cut -d= -f2)"
+      if [ "$got" != "$want" ]; then ko "(f-$label) erwartet pin_decision=$want, bekam '$got' (Ausgabe: $(printf '%s' "$out" | tr '\n' ' '))"; return; fi
+      if [ -n "$want_sha" ]; then
+        sha="$(printf '%s\n' "$out" | grep -m1 '^pin_keep_sha=' | cut -d= -f2)"
+        if [ "$sha" != "$want_sha" ]; then ko "(f-$label) erwartet pin_keep_sha=$want_sha, bekam '$sha'"; return; fi
+      fi
+      ok
+    }
+
+    GUARD_NEW_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    GUARD_NEW_VER="v1.0.190"
+    GUARD_OLD_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    mk_wf "$WORK/wf-neuer.yml" "$GUARD_NEW_SHA" "$GUARD_NEW_VER"
+    # v1.0.9 ist NUMERISCH älter, aber LEXIKALISCH neuer als v1.0.183 — genau
+    # die Falle, in die ein „im Kopf" vergleichender Agent tappt.
+    mk_wf "$WORK/wf-aelter.yml" "$GUARD_OLD_SHA" "v1.0.9"
+    printf '      - uses: anthropics/claude-code-action@v1\n' > "$WORK/wf-beweglich.yml"
+    GUARD_TPL_VER="$(grep -m1 -oE 'anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+' "$TEMPLATE" | sed -E 's/.*# //')"
+    GUARD_TPL_SHA="$(grep -m1 -oE 'anthropics/claude-code-action@[0-9a-f]{40}' "$TEMPLATE" | cut -d@ -f2)"
+    mk_wf "$WORK/wf-gleich.yml" "$GUARD_TPL_SHA" "$GUARD_TPL_VER"
+
+    check_guard "keine-datei"  ""                       no-installed-pin
+    check_guard "kein-sha-pin" "$WORK/wf-beweglich.yml" no-installed-pin
+    check_guard "aelter"       "$WORK/wf-aelter.yml"    template
+    check_guard "gleich"       "$WORK/wf-gleich.yml"    template
+    check_guard "neuer"        "$WORK/wf-neuer.yml"     keep-installed "$GUARD_NEW_SHA"
+
+    # Reparatur (Teil 2): nicht nur die ENTSCHEIDUNG prüfen, sondern dass der
+    # Rückschreib-sed die installierte Datei tatsächlich auf den "neuer"-Pin
+    # zurücksetzt — genau das Schutzziel, das eine reine Entscheidungsprüfung
+    # nicht abdeckt (#38-Kritik: "prüft nur die Entscheidung, nie die
+    # Reparatur"). RESTORE_TARGET startet als Kopie des TEMPLATE, simuliert
+    # also die Datei direkt NACH dem Kopieren in Schritt 6, bevor Teil 2 sie
+    # zurückschreibt.
+    RESTORE_TARGET="$WORK/wf-restore-target.yml"
+    cp "$TEMPLATE" "$RESTORE_TARGET"
+    restore_out="$(PIN_KEEP_SHA="$GUARD_NEW_SHA" PIN_KEEP_VER="$GUARD_NEW_VER" PIN_INSTALLED="$RESTORE_TARGET" bash "$RESTORE" 2>&1)"
+    restore_rc=$?
+    if [ "$restore_rc" != "0" ]; then
+      ko "(f-reparatur) Restore-Block brach ab (rc=$restore_rc): $restore_out"
+    else
+      restored_lines="$(grep -cF "anthropics/claude-code-action@${GUARD_NEW_SHA} # ${GUARD_NEW_VER}" "$RESTORE_TARGET" || true)"
+      stale_lines="$(grep -cF "anthropics/claude-code-action@${EXPECTED_PIN_SHA}" "$RESTORE_TARGET" || true)"
+      if [ "${restored_lines:-0}" -eq 5 ] && [ "${stale_lines:-0}" -eq 0 ]; then ok
+      else ko "(f-reparatur) erwartet alle 5 Pin-Zeilen auf ${GUARD_NEW_VER}/${GUARD_NEW_SHA} umgeschrieben, gefunden: restored=$restored_lines stale=$stale_lines"; fi
+    fi
   fi
 fi
 

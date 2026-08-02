@@ -51,10 +51,19 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Migration (version + field) im Abschlussbericht (Schritt 8) ausweisen.
 3. **Labels** (idempotent, `gh label create … || true`):
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
-   budget-exceeded (d93f0b), needs-human (d876e3), flow/quick (c2e0c6),
+   budget-exceeded (d93f0b), needs-human (d876e3), merge-blocked (0052cc, der PR
+   ist grün und fertig, der Merge wurde extern angehalten — ein Mensch mergt nach
+   Freigabe von Hand), flow/quick (c2e0c6),
    seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
    Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
+   `needs-human`, `budget-exceeded` und `merge-blocked` setzt der Runner seit
+   0.8.0 zusätzlich am zugehörigen PR — das ist dort das Signal „nicht mergen"
+   bzw. „von Hand mergen" und ersetzt das frühere Draft-Setzen. Repo-Labels
+   gelten für Issues und PRs gleichermaßen; ein zweites Label ist NICHT
+   anzulegen. Fehlt `merge-blocked` im Zielrepo (Installation vor 0.8.0),
+   scheitert das `--add-label` des Runners still: der Zustand steht dann nur im
+   Lauf-Bericht, nicht auf GitHub.
 4. **Board (optional, Stufe-1-Delta §13):** Labels sind in Stufe 1 die einzige
    Pflicht-Übersicht. Auf Operator-Wunsch: `gh project create --owner <owner>
    --title "flowkit — <repo>"` anlegen und dem Operator sagen, dass die
@@ -63,13 +72,26 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    bräuchte GraphQL-Mutationen — rote Linie). Kein Runner-Board-Sync in Stufe 1.
 5. **Hooks + Settings:** `${CLAUDE_PLUGIN_ROOT}/templates/hooks/*.sh` nach `.claude/hooks/`
    kopieren, `chmod +x`. `${CLAUDE_PLUGIN_ROOT}/templates/settings.json.template` nach
-   `.claude/settings.json` (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen).
+   `.claude/settings.json` (existiert eine: hooks/permissions-Blöcke mergen, nichts löschen —
+   EINE Ausnahme: Allow-Einträge, die auf `…/scripts/*` bzw. `…/templates/hooks/*` matchen
+   und NICHT dem aktuellen `${CLAUDE_PLUGIN_ROOT}` entsprechen, werden ERSETZT statt behalten;
+   sonst wächst bei jedem Plugin-Update eine tote Zeile mit altem Pfad dazu).
    Platzhalter ersetzen: {{PROTECTED_BRANCHES}} aus CONFIG.defaultBranch (+ master),
    {{OVERRIDE_LABEL}} aus CONFIG.overrideLabel, {{STACK_ALLOW}} = Allow-Zeilen für die
    Kommandopräfixe aus CONFIG.commands/extraGates (z. B. "Bash(uv run *)"), {{FORMAT_CMD_PY}}
-   = Format-Kommando des Repos oder `true` wenn keins. Danach validieren:
+   = Format-Kommando des Repos oder `true` wenn keins.
+   {{PLUGIN_ROOT}} = der ABSOLUTE Pfad aus `${CLAUDE_PLUGIN_ROOT}`, ohne Trailing-Slash
+   und ohne Anführungszeichen wörtlich in die Muster eingesetzt. Er gibt den
+   Plugin-eigenen Skripten (Worktree-Cleanup, `budget_report.py`, Hook-Tests) eine
+   Allowlist-Regel; ohne sie fällt jeder dieser Aufrufe an den Permission-Classifier
+   zurück, dessen Ausfall einen kompletten Lauf gekippt hat (Issue #31). ACHTUNG: der
+   Pfad ändert sich bei Neuinstallation oder Update des Plugins — danach `/flowkit:setup`
+   erneut laufen lassen (der Drift-Hinweis des SessionStart-Hooks erinnert daran).
+   Danach validieren:
    `python3 -m json.tool .claude/settings.json >/dev/null` (das Template selbst ist
-   wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein)
+   wegen {{STACK_ALLOW}} kein valides JSON — das installierte Ergebnis MUSS es sein),
+   `! grep -q '{{' .claude/settings.json` (kein unsubstituierter Platzhalter; bewusst
+   als negiertes `grep -q`, weil `grep -c` im Gutfall mit Exit-Code 1 endet)
    und gegen die INSTALLIERTE Fassung testen:
    `bash ${CLAUDE_PLUGIN_ROOT}/templates/hooks/test-pretooluse-blocker.sh .claude/hooks/pretooluse-blocker.sh`.
    Danach **Versions-Stempel:** `PLUGIN_VERSION` aus
@@ -82,7 +104,11 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    überschreiben, Inhalt NUR `<PLUGIN_VERSION>` (eine Zeile, sonst nichts) —
    sie ist die primäre Drift-Quelle für den SessionStart-Hook
    (`inject-context.sh`), der sie mit der jeweils installierten
-   Plugin-Version vergleicht.
+   Plugin-Version vergleicht. Diese Datei ist nur etwas wert, wenn sie im Repo
+   LANDET: ignoriert die .gitignore des Zielrepos `.claude/`, fehlt sie in jedem
+   frischen Clone, in CI und in jedem Runner-Worktree — die Drift-Warnung bleibt
+   dort dauerhaft still. Das Freistellen erledigt Schritt 7; hier die .gitignore
+   NICHT anfassen.
 5b. **Branch-Protection (Merge-Voraussetzung, Spec §6):** read-only prüfen:
    `gh api repos/$REPO_SLUG/branches/<defaultBranch>/protection` (GET ist erlaubt).
    Bei 404: dem Operator die Einrichtung anleiten (GitHub → Settings → Branches →
@@ -95,6 +121,76 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    nach `.github/scripts/flowkit_review/`, beide setup-Actions
    (`${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-claude-action`,
    `${CLAUDE_PLUGIN_ROOT}/templates/ci/setup-python-uv`) nach `.github/actions/`.
+
+   **Downgrade-Schutz für den `anthropics/claude-code-action`-Pin:** läuft in
+   zwei Teilen um das Kopieren herum, weil Teil 1 den ALTEN Stand lesen muss,
+   BEVOR er überschrieben wird. Die beiden Versionen NICHT selbst vergleichen
+   (`v1.0.9` sieht lexikalisch neuer aus als `v1.0.183`, ist es aber nicht) —
+   die folgenden Blöcke WÖRTLICH ausführen, nicht paraphrasieren.
+
+   TEIL 1 — VOR dem Überschreiben von `.github/workflows/pr-deep-review.yml`:
+   `PIN_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/templates/ci/pr-deep-review.yml.template"`
+   und `PIN_INSTALLED=".github/workflows/pr-deep-review.yml"` setzen, dann:
+
+   ```bash
+   # flowkit:action-pin-guard (Beginn)
+   # Eingaben: PIN_TEMPLATE (Pflicht), PIN_INSTALLED (Default unten, Datei darf fehlen).
+   # Ausgabe: vier key=value-Zeilen auf stdout. Exit 2 nur, wenn das TEMPLATE
+   # selbst keinen Pin hat — dann Schritt 6 abbrechen und im Bericht melden.
+   : "${PIN_TEMPLATE:?PIN_TEMPLATE (Pfad zum pr-deep-review.yml.template) muss gesetzt sein}"
+   PIN_INSTALLED="${PIN_INSTALLED:-.github/workflows/pr-deep-review.yml}"
+   PIN_RE='anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+'
+   tpl_pin="$(grep -m1 -oE "$PIN_RE" "$PIN_TEMPLATE" 2>/dev/null || true)"
+   if [ -z "$tpl_pin" ]; then echo "pin_decision=error-no-template-pin"; exit 2; fi
+   tpl_ver="${tpl_pin##*# }"
+   cur_pin=""
+   if [ -f "$PIN_INSTALLED" ]; then
+     cur_pin="$(grep -m1 -oE "$PIN_RE" "$PIN_INSTALLED" 2>/dev/null || true)"
+   fi
+   if [ -z "$cur_pin" ]; then
+     printf 'pin_decision=no-installed-pin\npin_template=%s\npin_installed=-\npin_keep_sha=-\n' "$tpl_ver"
+     exit 0
+   fi
+   cur_sha="${cur_pin#*@}"; cur_sha="${cur_sha%% *}"; cur_ver="${cur_pin##*# }"
+   newest="$(printf '%s\n%s\n' "$tpl_ver" "$cur_ver" | sort -V | tail -1)"
+   if [ "$newest" = "$cur_ver" ] && [ "$cur_ver" != "$tpl_ver" ]; then
+     printf 'pin_decision=keep-installed\npin_template=%s\npin_installed=%s\npin_keep_sha=%s\n' "$tpl_ver" "$cur_ver" "$cur_sha"
+   else
+     printf 'pin_decision=template\npin_template=%s\npin_installed=%s\npin_keep_sha=-\n' "$tpl_ver" "$cur_ver"
+   fi
+   # flowkit:action-pin-guard (Ende)
+   ```
+
+   Die vier Ausgabezeilen (`pin_decision`, `pin_template`, `pin_installed`,
+   `pin_keep_sha`) für den Abschlussbericht (Schritt 8) merken. Bei
+   `pin_decision=error-no-template-pin` Schritt 6 abbrechen und im Bericht
+   melden — das Template selbst hat keinen gültigen Pin, das kommt nur bei
+   einem kaputten Plugin-Stand vor.
+
+   TEIL 2 — NACH dem Kopieren, NUR bei `pin_decision=keep-installed`: die
+   beiden erhaltenswerten Werte aus Teil 1 in Variablen übernehmen
+   (`PIN_KEEP_SHA=<pin_keep_sha aus Teil 1>`,
+   `PIN_KEEP_VER=<pin_installed aus Teil 1>` — Werte einsetzen, nicht als Text
+   im Befehl stehen lassen) und dann WÖRTLICH:
+
+   ```bash
+   # flowkit:action-pin-restore (Beginn)
+   : "${PIN_KEEP_SHA:?PIN_KEEP_SHA (der zu erhaltende SHA aus Teil 1, Feld pin_keep_sha) muss gesetzt sein}"
+   : "${PIN_KEEP_VER:?PIN_KEEP_VER (der zugehörige Versionskommentar aus Teil 1, Feld pin_installed) muss gesetzt sein}"
+   PIN_INSTALLED="${PIN_INSTALLED:-.github/workflows/pr-deep-review.yml}"
+   sed -E -i.flowkitbak \
+     "s|anthropics/claude-code-action@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+|anthropics/claude-code-action@${PIN_KEEP_SHA} # ${PIN_KEEP_VER}|g" \
+     "$PIN_INSTALLED"
+   rm -f "${PIN_INSTALLED}.flowkitbak"
+   # flowkit:action-pin-restore (Ende)
+   ```
+
+   Bei `pin_decision=template` (auch bei Gleichstand) bleibt der Template-Pin
+   stehen, Teil 2 entfällt. Bei `pin_decision=no-installed-pin` — bestehende
+   Datei ohne SHA-Pin, z. B. ein beweglicher `@v1`-Tag — gewinnt ebenfalls das
+   Template; das ist eine Härtung, kein Downgrade. In jedem Fall eine Zeile
+   für den Abschlussbericht merken.
+
    Platzhalter aus `.github/flowkit-review.json` (aus Template anlegen) ersetzen.
    Neue Config-Keys mit dem Operator klären: `criticalPaths` (Array von
    Pfad-Präfixen, deren Änderungen die Reviewer auf P1 eskalieren — z. B.
@@ -122,7 +218,57 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    leer, den Typecheck-Step (`- name: Typecheck (blocking)` samt `run:`-Zeile)
    ersatzlos ENTFERNEN — ein leerer `run:` wäre ein kaputter Pflicht-Step, der
    jeden Merge blockiert. Danach `actionlint`, falls installiert.
-7. **.gitignore:** Zeile `.flowkit/` ergänzen.
+7. **.gitignore-Guard (versionierbar machen, idempotent):**
+   `bash ${CLAUDE_PLUGIN_ROOT}/scripts/gitignore-guard.sh .` ausführen. Das
+   Script ignoriert die Laufzeit-Artefakte des Runners (`.flowkit/`,
+   `.claude/worktrees/`), soweit sie es nicht schon sind, und stellt die in
+   Schritt 5 erzeugten Dateien frei, falls ein Ignore-Muster greift:
+   `.claude/flowkit-version`, `.claude/settings.json`,
+   `.claude/workflow.config.json`, `.claude/hooks/*.sh`. Jede Zeile hängt an
+   einer eigenen Bedarfsprüfung (`git check-ignore --no-index`, also gegen die
+   Ignore-REGELN, nicht gegen den Index) — was vorher sichtbar war, bleibt
+   sichtbar. Aufruf ZWINGEND aus der Repo-Wurzel: der Block ist root-verankert,
+   ein Unterverzeichnis lehnt der Guard ab, statt die Root-.gitignore eines
+   Monorepos zu beschreiben. Es schreibt genau EINEN markierten Block
+   (`# >>> flowkit` … `# <<< flowkit`) und baut ihn bei jedem Lauf neu; ein
+   zweites `/flowkit:setup` erzeugt keine doppelten Zeilen. Die .gitignore
+   darüber hinaus NICHT von Hand ändern und keine Negation selbst anhängen:
+   eine nackte `!.claude/flowkit-version`-Zeile ist wirkungslos, weil Git in ein
+   ausgeschlossenes Elternverzeichnis nicht absteigt.
+   Ausgabe UND Exit-Code auswerten:
+   - `gitignore-guard: ok …` bzw. `gitignore-guard: fixed <pfade>` (Exit 0) →
+     im Abschlussbericht nennen, was ergänzt wurde.
+   - `gitignore-guard: BLOCKIERT trotz Ergänzung: <pfade>` (Exit 3) → die Pfade
+     bleiben ignoriert (typisch: eine eigene `.gitignore` INNERHALB von
+     `.claude/`). NICHT mit `git add -f` erzwingen. Stattdessen wörtlich in den
+     Abschlussbericht: „Drift-Warnung inaktiv: <pfade> lassen sich in diesem
+     Repo nicht versionieren — die Templates-veraltet-Meldung des
+     SessionStart-Hooks löst in frischen Clones nie aus."
+   - Exit 1 (kein Git-Work-Tree, übergebener Pfad ist nicht die Repo-Wurzel,
+     markierter Block ohne `# <<< flowkit`-Marke, oder .gitignore nicht
+     schreibbar — die .gitignore bleibt in allen vier Fällen unverändert) →
+     ebenfalls in den Bericht; Setup läuft weiter. Bei „ohne END-Marke" die
+     .gitignore von Hand richten (END-Marke wiederherstellen oder den ganzen
+     Block entfernen) und den Guard erneut laufen lassen — er darf nicht raten,
+     wo der Block endet, sonst löscht er die eigenen Regeln des Zielrepos mit.
 8. **Abschlussbericht:** was angelegt/geändert/übersprungen wurde, als Chat-Ausgabe;
-   Änderungen im Zielrepo als Branch + PR (Titel "chore: install flowkit"), NICHT
-   direkt auf den Default-Branch.
+   bei installiertem CI-Gate ZWINGEND eine Zeile zum `claude-code-action`-Pin —
+   welche Version jetzt in `.github/workflows/pr-deep-review.yml` steht,
+   welche das Template mitbringt, und bei `pin_decision=keep-installed`
+   ausdrücklich „neuerer Pin im Zielrepo beibehalten, Template-Pin
+   `<pin_template>` ist älter"; Änderungen im Zielrepo als Branch + PR (Titel
+   "chore: install flowkit"), NICHT direkt auf den Default-Branch.
+   Vor dem Commit die von Schritt 7 freigestellten Pfade explizit stagen —
+   ZUSÄTZLICH zu allem, was Schritt 1, 6 und 6b erzeugt haben:
+   `git add .gitignore .claude/flowkit-version .claude/settings.json .claude/workflow.config.json .claude/hooks`
+   plus, soweit in diesem Lauf angelegt oder geändert, `AGENTS.md`,
+   `.github/workflows/pr-deep-review.yml`, `.github/flowkit-review.json`,
+   `.github/scripts/flowkit_review`, `.github/actions/setup-claude-action`,
+   `.github/actions/setup-python-uv` und `.github/workflows/gates.yml`.
+   Der Installations-PR MUSS die `.claude/`-Dateien enthalten, sonst ist die
+   Installation rein lokal und in jedem Clone wirkungslos; er MUSS ebenso das
+   CI-Gate enthalten, sonst installiert er eine Konfiguration ohne den Prüfpfad,
+   den sie voraussetzt. Kein blankes `git add -A`: es verschluckt ein Scheitern
+   von Schritt 7 still und sammelt lokalen Claude-Zustand mit ein. Meldete
+   Schritt 7 `BLOCKIERT`, die betroffenen Pfade NICHT erzwingen — weglassen und
+   den dortigen Hinweis-Satz in den Bericht übernehmen.

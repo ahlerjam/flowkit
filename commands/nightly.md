@@ -116,16 +116,36 @@ Dazu ehrlich dazusagen, statt es zu verschweigen:
 Diesen Abschnitt in den Bericht übernehmen — er ist die Begründung, warum hier
 niemand wach bleiben muss:
 - **Hartes Budget je Issue** (`budgets` nach `size/S|M|L`): Überschreitung bricht
-  die Einheit sauber ab — Kommentar, Label `budget-exceeded`, PR als Draft,
+  die Einheit sauber ab — Kommentar, Label `budget-exceeded` an Issue und PR,
+  Abbruchkommentar am PR (der PR bleibt ready, damit die Review-Pipeline läuft),
   Worktree-Cleanup — statt die Nacht durchzubrennen. Der Lauf macht weiter.
 - **Issue-globale Fix-Runden** (`maxFixRounds`) mit genau EINER Modell-Eskalation,
   danach `needs-human`: keine Endlosschleife, der Lauf geht zum nächsten Issue.
+- **Fortschritts-Circuit-Breaker** (`progressStopAfter`, Default 3): enden drei
+  Einheiten in Folge ohne Merge, hält der Lauf an und meldet es — eine Nacht,
+  in der nichts mehr gelingt (ausgefallener Permission-Classifier, gh-Ausfall,
+  kaputte CI), wird nicht in voller Länge durchgebrannt.
+- **CI-Infrastruktur wird wiederholt, nicht gefixt:** scheitert ein Job vor dem
+  eigentlichen Testaufruf (Paketdownload, Runner-Provisionierung, Checkout) oder
+  trägt sein Log eine bekannte Infrastruktur-Signatur (erweiterbar über
+  `ciInfraSignatures`), antwortet die Gate-Wait-Station mit `gh run rerun
+  --failed` statt mit einer Fix-Runde — ein Re-Run je rotem Lauf, höchstens zwei.
+  Er zählt nicht auf `maxFixRounds`: ein PyPI-Ausrutscher um drei Uhr kostet
+  nachts keine Einheit mehr. Scheitert derselbe Step erneut, ist er
+  reproduzierbar und wird wieder inhaltlich behandelt.
 - **Merge nur über das serverseitige Gate:** `mergeCheck` muss grün sein, die
   Branch-Protection aus Schritt 1.2 erzwingt es unabhängig vom Agenten; gemergt
   wird ausschließlich im Merge-Lock, semantische Konflikte brechen ab
   (`needs-human`) statt geraten zu werden.
-- **`onSmokeFailure: "revert"`:** ein roter Post-Merge-Smoke rollt den Merge
-  zurück und stoppt weitere Merges — der Default-Branch bleibt über Nacht grün.
+- **`onSmokeFailure: "revert"`:** ein BELEGT roter Post-Merge-Lauf (abgeschlossener
+  CI-Lauf auf dem eigenen Merge-Commit mit `conclusion` `failure`/`timed_out` oder
+  roter Smoke) rollt den Merge zurück und stoppt weitere Merges — der
+  Default-Branch bleibt über Nacht grün. Ein abgebrochener Lauf (`cancelled`,
+  typisch bei `concurrency: cancel-in-progress` auf dem Default-Branch) ist keine
+  Messung: er wird über den jüngsten abgeschlossenen Lauf, der den eigenen
+  Merge-Commit enthält, neu bestimmt — und weil dieser Lauf auch fremde Commits
+  testet, bestätigt er nur Grün. Bleibt es unbestimmt, rollt nichts zurück und der
+  Lauf fährt fort (`done[].postMerge == "unmeasured"`).
 - **Pre-Flight:** dirty Default-Branch, fehlende Branch-Protection oder
   gh-Auth-Problem → der Lauf startet erst gar nicht, statt halb zu laufen.
 - **`caps.issuesPerRun` und `max <X>`** deckeln die Nacht doppelt; GitHub-native
@@ -144,15 +164,26 @@ Mensch den Scope gelesen hat. Die Qualität der Nacht ist die Qualität der Queu
 
 Erster Griff: `/flowkit:status`. In dieser Reihenfolge lesen:
 1. **needs-human** — hier wartet eine Entscheidung; der Grund steht im letzten
-   Issue-Kommentar bzw. im Draft-PR.
+   Issue-Kommentar und im Abbruchkommentar am PR (erste Zeile
+   `<!-- flowkit-abort:v1 -->`); der PR ist nicht mehr Draft, sein
+   Review-Urteil steht also zur Verfügung.
 2. **Gestrandete Arbeit** — `budget-exceeded` mit offenem PR wird mit
    `/flowkit:implement resume` fortgesetzt (Budget zählt frisch), `needs-human`
-   nur bewusst mit `resume all`.
-3. **Letzte Läufe** — erledigt/needs-human/blocked und der Stop-Grund des
-   Nachtlaufs.
-4. **Budget-Kalibrierung** — nach einigen Delta-Läufen die Vorschläge für
+   nur bewusst mit `resume all`. Stammt der PR aus einem Lauf vor 0.8.0 und ist
+   noch Draft: `resume` setzt ihn automatisch wieder ready; ohne Resume hilft
+   nur ein manuelles `gh pr ready <N>`.
+3. **merge-blocked** — der PR ist grün und fertig, nur der Merge wurde
+   angehalten (typisch bei unbeaufsichtigten Läufen). Kein resume: nach
+   Freigabe von Hand mergen (`gh pr merge <PR> --squash --delete-branch`) oder
+   das Label gegen `agent-ready` tauschen, damit die nächste Nacht es erneut
+   versucht. Häufen sich diese Fälle in einer Nacht, hält der Lauf von selbst an
+   (Fortschritts-Circuit-Breaker) — die Blockade ist dann systemisch.
+4. **Letzte Läufe** — erledigt/needs-human/merge-blocked/blocked, die Zahl der
+   Einheiten mit ungeprüftem Post-Merge (`post-merge-unmeasured`) und der
+   Stop-Grund des Nachtlaufs.
+5. **Budget-Kalibrierung** — nach einigen Delta-Läufen die Vorschläge für
    `budgets.<size>.tokens` sichten; Übernahme bleibt Operator-Entscheidung.
-5. Die über Nacht gemergten PRs quer lesen. Auto-Merge heißt geprüft, nicht
+6. Die über Nacht gemergten PRs quer lesen. Auto-Merge heißt geprüft, nicht
    ungesehen.
 
 ## 6. Abschlussbericht

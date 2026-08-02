@@ -10,7 +10,13 @@
       "Bash(gh milestone list*)", "Bash(gh sub-issue*)", "Bash(gh run list*)", "Bash(gh run view*)",
       "Bash(gh label list*)", "Bash(gh api repos/*/branches/*/protection)",
       "Bash(git push*)", "Bash(git switch*)", "Bash(git merge*)",
-      "Bash(jq *)", "Bash(mktemp*)",
+      "Bash(jq *)", "Bash(mktemp *)",
+      "Bash(bash {{PLUGIN_ROOT}}/scripts/*)", "Bash(python3 {{PLUGIN_ROOT}}/scripts/*)",
+      "Bash(bash {{PLUGIN_ROOT}}/templates/hooks/*)",
+      "Bash(gh pr edit*)", "Bash(gh run rerun*)",
+      "Bash(git check-ignore*)", "Bash(git merge-base*)", "Bash(git revert*)",
+      "Bash(tail *)", "Bash(head *)", "Bash(sort *)", "Bash(uniq *)",
+      "Bash(awk '{print $4}')", "Bash(awk {print $4})",
       {{STACK_ALLOW}}
     ],
     "deny": [

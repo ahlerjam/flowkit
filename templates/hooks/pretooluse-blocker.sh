@@ -20,9 +20,28 @@ REGEX="$REGEX|gh[^|;&]*--admin"
 REGEX="$REGEX|gh[[:space:]]+api[^|;&]*(-X|--method)[[:space:]]*=?[[:space:]]*(DELETE|PATCH|POST|PUT)"
 REGEX="$REGEX|gh[[:space:]]+api[^|;&]*[[:space:]](-[fF]|--field|--raw-field|--input)([[:space:]=]|$)|gh[[:space:]]+api[^|;&]*[[:space:]]-[fF][^|;&[:space:]]"
 REGEX="$REGEX|gh[[:space:]]+(pr|issue)[[:space:]]+edit[^|;&]*--add-label[^A-Za-z0-9]+${OVERRIDE_LABEL}"
-# Generalisierte Secret-Erkennung (Quelle hatte nur HCLOUD_TOKEN — quelle-hooks-settings.md §4.4
-# fordert Generalisierung, nicht Entfernung): Inline-Zuweisung eines Secret-artigen Werts.
+# Generalisierte, anbieterneutrale Secret-Erkennung: Inline-Zuweisung eines
+# Secret-artigen Werts (>= 16 Zeichen ohne Whitespace) an einen Bezeichner, der
+# eines der Schlüsselwörter der Alternation enthält. Wird die Alternation
+# erweitert, verlangt test-pretooluse-blocker.sh einen passenden Testfall.
 REGEX="$REGEX|[A-Za-z_]*(TOKEN|SECRET|PASSWORD|API_KEY|APIKEY)[A-Za-z_]*=[^[:space:]]{16,}"
+# Interpreter-Escapes. Die Allow-Regeln der Permission-Ebene sind Präfix-Matches
+# je Teilbefehl: ein Interpreter mit freiem Argument hebt sie als Ganzes auf
+# (awk führt über BEGIN{system("…")} beliebige Befehle aus). Die Allowlist lässt
+# awk deshalb nur noch wörtlich als '{print $4}' zu — diese Regeln sind die
+# zweite Verteidigungslinie dahinter und gelten auch für ein Repo, das sich
+# awk selbst breiter freigeschaltet hat.
+REGEX="$REGEX|awk[^;&|]*system[[:space:]]*\("
+REGEX="$REGEX|awk[^;&]*\|[[:space:]]*(\"[^\"]*sh\"|getline)"
+# Pipe in eine Shell (curl … | sh, echo … | bash). Die Klammer vor sh deckt
+# bash/dash/ksh/zsh mit ab; das abschließende [[:space:]]|$ hält shasum/shuf raus.
+REGEX="$REGEX|\|[[:space:]]*(sudo[[:space:]]+)?([^|;&[:space:]]*/)?(ba|da|k|z)?sh([[:space:]]|$)"
+REGEX="$REGEX|(curl|wget)[^;&]*\|[[:space:]]*(sudo[[:space:]]+)?([^|;&[:space:]]*/)?(python[0-9.]*|perl|ruby|node)([[:space:]]|$)"
+# Traversal aus einem freigegebenen Skriptverzeichnis heraus: die Allow-Regel
+# "Bash(bash <PLUGIN_ROOT>/scripts/*)" ist ein Präfix-Match und deckt damit auch
+# …/scripts/../../beliebig.sh ab. Nur die absolute Form wird geblockt — ein
+# relatives `bash ../x.sh` ist ohnehin von keiner Allow-Regel gedeckt.
+REGEX="$REGEX|(^|[^A-Za-z0-9_.])(sudo[[:space:]]+)?((ba|da|k|z)?sh|python[0-9.]*|perl|ruby|node)[[:space:]]+/[^|;&]*/\.\./"
 
 printf '%s' "$cmd" | grep -iqE "$REGEX" \
   && { echo "$PREFIX blocked dangerous pattern (protected branches: $PROTECTED_BRANCHES). See AGENTS.md." >&2; exit 2; } \

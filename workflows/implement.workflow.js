@@ -80,6 +80,24 @@ const orphanProt = PROT.filter((p) => !(C.areas || []).includes(p))
 if (orphanProt.length) {
   throw new Error(`flowkit: protectedAreas ${JSON.stringify(orphanProt)} fehlen in areas — als area/*-Label nie vergebbar, der Schutz wäre strukturell wirkungslos. areas in workflow.config.json ergänzen.`)
 }
+// CI-Infrastruktur statt Code (Issue #36): scheitert ein Job VOR dem eigentlichen
+// Test-/Lint-/Review-Aufruf (Checkout, Setup-Action, Paketdownload,
+// Runner-Provisionierung), ist das keine Aussage über den Code. Eine Fix-Runde
+// kostet dort einen kompletten Agenten-Durchlauf für eine Ursache, die es nicht
+// gibt (ab Runde 2 auch noch eine Modellstufe höher). Ein Re-Run ist billiger,
+// aber NICHT gratis: ist der rote Lauf die Review-Pipeline selbst (Default
+// mergeCheck "coordinator"), verbraucht er erneut deren Modell-Kontingent.
+// Deshalb gedeckelt statt frei — ein Re-Run je rotem Lauf, höchstens zwei in der
+// Station; ein reproduzierbarer Setup-Fehler (kaputter Dependency-Pin) muss
+// inhaltlich behandelt und nicht endlos wiederholt werden.
+const INFRA_SIG_DEFAULT = ['operation timed out', 'Failed to download', 'error sending request for url', 'Could not resolve host', 'The runner has received a shutdown signal']
+if (C.ciInfraSignatures !== undefined && (!Array.isArray(C.ciInfraSignatures) || C.ciInfraSignatures.some((s) => typeof s !== 'string' || !s.trim()))) {
+  throw new Error(`flowkit: ciInfraSignatures muss ein Array nicht-leerer Strings sein (ist ${JSON.stringify(C.ciInfraSignatures)}) — ein Leerstring wäre Teilstring JEDES Logs und würde jeden roten Check als Infrastruktur werten (die inhaltliche Prüfung des Gates wäre damit ausgehebelt); ein falscher Typ würde still ignoriert.`)
+}
+// concat statt Ersetzen: eine gesetzte Config darf die eingebauten Signaturen
+// nicht abschalten — sie ergänzt repo-eigene Infrastruktur (selbstgehostete
+// Runner, interne Registry).
+const INFRA_SIG = Array.from(new Set(INFRA_SIG_DEFAULT.concat(C.ciInfraSignatures || [])))
 const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: 'opus' }
 // Token-Attribution: budget.spent() ist ein GLOBALER Zähler. Sein Delta ist nur bei
 // parallelism 1 einer Einheit zurechenbar — bei >1 enthielte es den Verbrauch aller
@@ -96,6 +114,15 @@ const budgetFor = (u) => (C.budgets && C.budgets[u.size]) || { turns: 60, tokens
 const RUN_FACTOR = C.runBudgetFactor === undefined ? 1.2 : C.runBudgetFactor
 if (typeof RUN_FACTOR !== 'number' || !(RUN_FACTOR > 0) || !Number.isFinite(RUN_FACTOR)) {
   throw new Error(`flowkit: runBudgetFactor muss eine positive Zahl sein (ist ${JSON.stringify(C.runBudgetFactor)}) — ein ungültiger Wert ergäbe NaN als Lauf-Deckel und würde ihn still abschalten.`)
+}
+// Fortschritts-Circuit-Breaker (Issue #31): ein Lauf, der 23 Einheiten
+// durchreicht, ohne einen einzigen PR zu erzeugen, soll nicht bis zum Ende
+// brennen. Gezählt werden abgeschlossene Einheiten OHNE Merge IN FOLGE
+// (needs-human, Budget-Abbruch, technischer Fehler); ein Merge oder eine
+// gh-verifizierte Erledigung setzt zurück. 0 schaltet den Breaker ab.
+const PROGRESS_STOP = C.progressStopAfter === undefined ? 3 : C.progressStopAfter
+if (!Number.isInteger(PROGRESS_STOP) || PROGRESS_STOP < 0) {
+  throw new Error(`flowkit: progressStopAfter muss eine ganze Zahl >= 0 sein (ist ${JSON.stringify(C.progressStopAfter)}) — ein ungültiger Wert würde den Fortschritts-Circuit-Breaker still abschalten (ein String wie "3" ergäbe in noProgress >= "3" ein anderes Verhalten).`)
 }
 // Lauf-Gesamtdeckel: Summe der Einheiten-Budgets dieses Laufs, mal Reserve-Faktor.
 const runCap = Math.round(units.reduce((s, u) => s + budgetFor(u).tokens, 0) * RUN_FACTOR)
@@ -146,14 +173,22 @@ const PRE = `Lies ZUERST AGENTS.md im Repo-Root — Konventionen und rote Linien
 // nur noch aus. Ohne pluginRoot (alter Skill-Aufrufer) greift die Prompt-Regel.
 const ROOT = typeof A.pluginRoot === 'string' && A.pluginRoot ? A.pluginRoot.replace(/\/+$/, '') : null
 const CLEANUP_SH = ROOT ? `${ROOT}/scripts/cleanup-worktrees.sh` : null
+// Allowlist statt Permission-Classifier (Issue #31): /flowkit:setup trägt die
+// Plugin-Script-Pfade als PRÄFIX-Muster in permissions.allow ein
+// (`Bash(bash <pluginRoot>/scripts/*)`). Ein gequoteter Pfad ergibt ein Kommando,
+// das mit `bash "` beginnt und damit auf kein solches Muster passt — genau dieser
+// Aufruf landete beim ausgefallenen Classifier und kippte einen ganzen Lauf.
+// Deshalb quoten wir nur noch, wenn der Pfad es wirklich braucht; dieser Randfall
+// (Leerzeichen/Sonderzeichen im Plugin-Pfad) fällt sichtbar und selten zurück.
+const shArg = (p) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(p) ? p : `"${p}"`)
 const wtCleanup = (n) => CLEANUP_SH
-  ? `Worktree-Cleanup NUR für Issue #${n}: führe aus: bash "${CLEANUP_SH}" --issue ${n} — das Script entfernt deterministisch ausschließlich Worktrees, deren Branch die Issue-Nummer ${n} als eigenes (durch Nicht-Ziffern begrenztes) Segment trägt; Haupt-Tree, detached und fremde Worktrees fasst es nie an. KEINE eigenen git worktree remove/prune-Aufrufe zusätzlich. Meldet das Script "nichts zu entfernen", ist das das korrekte Ergebnis.`
+  ? `Worktree-Cleanup NUR für Issue #${n}: führe aus: bash ${shArg(CLEANUP_SH)} --issue ${n} — das Script entfernt deterministisch ausschließlich Worktrees, deren Branch die Issue-Nummer ${n} als eigenes (durch Nicht-Ziffern begrenztes) Segment trägt; Haupt-Tree, detached und fremde Worktrees fasst es nie an. KEINE eigenen git worktree remove/prune-Aufrufe zusätzlich. Meldet das Script "nichts zu entfernen", ist das das korrekte Ergebnis.`
   : `Worktree-Cleanup NUR für Issue #${n}: \`git worktree list --porcelain\` lesen und ausschließlich Worktrees entfernen, deren ausgecheckter Branch die Issue-Nummer ${n} als eigenes Segment im Branchnamen trägt. Worktrees anderer Issues, Worktrees anderer Läufe und den Haupt-Tree NIEMALS anfassen — auch dann nicht, wenn sie verwaist, leer oder alt aussehen: parallel laufende Einheiten arbeiten darin. Kein Aufräumen nach Pfadmuster, kein \`git worktree prune\`. Bleibt nach dieser Regel nichts übrig, ist das das korrekte Ergebnis.`
 
 const PR_SCHEMA = {
   type: 'object', required: ['pr', 'branch', 'skipped'], additionalProperties: false,
   properties: {
-    pr: { type: 'integer', description: 'PR-Nummer; 0 wenn skipped' },
+    pr: { type: 'integer', description: 'PR-Nummer, wie gh sie ausgegeben hat; 0 ausschließlich bei skipped=true' },
     branch: { type: 'string' },
     skipped: { type: 'boolean', description: 'true wenn Issue bereits erledigt' },
     note: { type: 'string' },
@@ -181,13 +216,122 @@ const VERIFY_SCHEMA = {
     note: { type: 'string' },
   },
 }
+// additionalProperties: false verwirft jedes Feld, das hier nicht steht — ohne die
+// Diagnosefelder (Issue #34, #36) KANN die Station Draft-Zustand, Lauf-Zahl und
+// Infra-Re-Run gar nicht melden, egal wie gut der Prompt ist. Prompt- und
+// Schema-Änderung gehören deshalb immer in denselben Commit: nur den Prompt zu
+// erweitern hieße, dass jede Antwort mit dem neuen Feld an der Validierung
+// scheitert und die Station technisch ausfällt. required bleibt ['green']: eine
+// Antwort ohne Diagnose (abgewürgter Agent) bleibt gültig und schlägt nicht als
+// technischer Fehler durch — sie rendert dann als "unbekannt".
 const WAIT_SCHEMA = {
   type: 'object', required: ['green'], additionalProperties: false,
-  properties: { green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' }, note: { type: 'string' } },
+  properties: {
+    green: { type: 'boolean', description: 'true erst nach einem grünen Check-Durchlauf' },
+    draftAtEntry: { type: 'boolean', description: 'war der PR beim Eintritt in die Station ein Draft (dann liefert die Review-Pipeline per Design keinen grünen Pflicht-Check) — die Station hat ihn in dem Fall auf ready gesetzt' },
+    runsFound: { type: 'integer', minimum: 0, description: 'Zahl der Workflow-Läufe auf dem PR-HEAD-SHA beim letzten Blick (gh run list --branch, gefiltert auf headSha)' },
+    retriggered: { type: 'boolean', description: `true NUR, wenn die Station den einen erlaubten Re-Trigger tatsächlich ausgeführt hat: ein BEHIND-Update (git merge origin/${BRANCH} im eigenen Worktree, gepusht) — ein Draft-Toggle und ein leerer Commit sind als Re-Trigger nachweislich wirkungslos und deshalb verboten` },
+    infraRerun: { type: 'boolean', description: 'true, wenn wegen einer CI-Infrastruktur-Ursache mindestens ein gh run rerun --failed nötig war (zählt NICHT auf maxFixRounds)' },
+    note: { type: 'string' },
+  },
 }
+// Diagnose-Kontext der Gate-Wait-Station (Issue #34): bleibt ein PR ohne grünen
+// Pflicht-Check, startet der Operator sonst bei null — im Vorfall kostete allein
+// die Feststellung "der PR war ein Draft" Stunden. runUnit bildet das Objekt VOR
+// dem GATE:-Wurf und gibt es AUCH auf dem Erfolgspfad zurück (done[].gateDiag):
+// ein still geheilter Draft hinterlässt sonst keine Spur, und Auswertungen lesen
+// ein Feld statt Prosa. Fehlendes Feld = null und rendert als "unbekannt" — nie
+// "undefined" und nie stillschweigend "nein"/"0".
+const gateDiagOf = (w) => ({
+  draftAtEntry: w && typeof w.draftAtEntry === 'boolean' ? w.draftAtEntry : null,
+  runsFound: w && Number.isInteger(w.runsFound) ? w.runsFound : null,
+  retriggered: w && typeof w.retriggered === 'boolean' ? w.retriggered : null,
+  // Issue #36 fährt im selben Objekt mit statt in einem eigenen Return-Feld: der
+  // Infra-Re-Run muss GENAU DORT ankommen, wo die Einheit scheitert (GATE:-Wurf →
+  // needs-human-Kommentar), sonst sieht der Operator die flakige CI nur im
+  // Erfolgsfall und nie im Schadensfall.
+  infraRerun: w && typeof w.infraRerun === 'boolean' ? w.infraRerun : null,
+})
+const gateDiagText = (d) => `(Draft beim Eintritt: ${d.draftAtEntry === null ? 'unbekannt' : d.draftAtEntry ? 'ja' : 'nein'}; Workflow-Läufe auf dem Branch: ${d.runsFound === null ? 'unbekannt' : d.runsFound}; Re-Trigger (BEHIND-Update): ${d.retriggered === null ? 'unbekannt' : d.retriggered ? 'ausgeführt' : 'nein'}; CI-Infrastruktur-Re-Run: ${d.infraRerun === null ? 'unbekannt' : d.infraRerun ? 'ausgeführt' : 'nein'})`
+// Dreiwertig statt boolean (Issue #32): ein abgebrochener oder übersprungener
+// Post-Merge-Lauf ist KEINE Rotmeldung, sondern eine fehlende Messung. Nur
+// failure/timed_out auf dem eigenen Merge-Commit (bzw. ein roter Smoke) sind ein
+// Beleg — nur dafür darf die onSmokeFailure-Policy laufen. `enum` steht wie im
+// PRCHECK_SCHEMA bewusst NEBEN `type`: bares enum nutzt sonst kein Schema dieser
+// Datei, die Engine-Toleranz dafür ist unverifiziert. postMergeGreen entfällt
+// ersatzlos — zwei Wahrheitsquellen könnten sich widersprechen.
+// blocked (Review 0.8.0): der Prompt verlangt an zwei Stellen einen bewussten
+// Nicht-Merge (Abbruch-Label am PR, semantischer Merge-Konflikt). Bis hierher
+// hatte dieser Ausgang KEINEN schema-gültigen Rückgabewert — unter erzwungenem
+// Schema bleibt einem Agenten dann nur merged:false, und das routet in die
+// Merge-Diagnose, die weder Labels noch Konflikte liest: sie sieht OPEN/grün und
+// meldet dem Operator "PR ist grün und fertig, es fehlt nur die Merge-Freigabe"
+// — genau die Aufforderung zum Handmerge, die der Guard verhindern sollte.
+// Optional statt required: ein Agent, der stattdessen wie bisher wirft, bleibt
+// gültig (der Wurf ist der ältere, ebenfalls erwünschte Weg), und ein
+// erfolgreicher Merge muss kein Zusatzfeld füllen. Die anderen Abbruchgründe des
+// Prompts (Checks nicht mehr grün, Timeout nach BEHIND-Update) brauchen KEINEN
+// eigenen Wert: die read-only Merge-Diagnose sieht rote bzw. laufende Checks
+// selbst und klassifiziert sie richtig. Label und Konflikt sieht sie nicht.
 const GATE_SCHEMA = {
-  type: 'object', required: ['merged', 'postMergeGreen'], additionalProperties: false,
-  properties: { merged: { type: 'boolean' }, postMergeGreen: { type: 'boolean', description: 'false = main-CI oder Smoke nach dem Merge rot; onSmokeFailure-Policy wurde ausgeführt' }, note: { type: 'string' } },
+  type: 'object', required: ['merged', 'postMerge'], additionalProperties: false,
+  properties: {
+    merged: { type: 'boolean' },
+    blocked: {
+      type: 'string', enum: ['none', 'abort-label', 'conflict'],
+      description: 'bewusst NICHT gemergt: abort-label = needs-human/budget-exceeded am PR (Abbruch-Signal eines früheren Laufs), conflict = semantischer Merge-Konflikt beim BEHIND-Update; none oder fehlend = kein bewusster Abbruch',
+    },
+    postMerge: {
+      type: 'string', enum: ['green', 'red', 'unmeasured'],
+      description: 'green = abgeschlossener Post-Merge-Lauf mit conclusion success (plus Smoke, falls gesetzt); red = conclusion failure oder timed_out AUF DEM EIGENEN Merge-Commit bzw. roter Smoke — onSmokeFailure-Policy wurde ausgeführt; unmeasured = kein abgeschlossener eigener Lauf mit verwertbarem Urteil (cancelled/skipped/neutral/…, auch nach Neubestimmung) — KEINE Policy, KEIN Revert',
+    },
+    note: { type: 'string' },
+  },
+}
+// Weltzustand statt Agent-Prosa (Issue #31, löst #33): der Builder-Return ist
+// eine BEHAUPTUNG. Fällt der Bash-Permission-Classifier aus, endet der Agent
+// REGULÄR mit Prosa und liefert schema-konform pr:0 bzw. skipped:true — bis
+// 0.7.0 verbuchte der Runner das als Erfolg. Diese Station fragt GitHub und
+// liefert die einzige PR-Nummer, mit der weitergearbeitet wird. `found` und `pr`
+// getrennt zu führen macht "kein PR" mechanisch prüfbar, statt es aus Prosa zu
+// raten; `state` trennt "schon gemergt" von "gibt keinen PR". `enum` steht
+// bewusst NEBEN `type` — kein anderes Schema dieser Datei nutzt bares enum, die
+// Engine-Toleranz dafür ist unverifiziert.
+const PRCHECK_SCHEMA = {
+  type: 'object', required: ['found', 'pr', 'branch', 'state'], additionalProperties: false,
+  properties: {
+    found: { type: 'boolean', description: 'true nur, wenn gh genau einen verwertbaren PR mit exakt "Closes #<n>" im Body geliefert hat' },
+    pr: { type: 'integer', description: 'PR-Nummer laut gh; 0 wenn found=false' },
+    branch: { type: 'string', description: 'headRefName laut gh; leer wenn found=false' },
+    state: { type: 'string', enum: ['OPEN', 'MERGED', 'CLOSED', 'NONE'], description: 'PR-Zustand laut gh; NONE wenn kein PR' },
+    // Mehrdeutigkeit ist kein "es gibt keinen PR" (Review 0.8.0): Schritt 3 des
+    // Prompts erkennt zwei verifizierte OFFENE PRs bewusst, meldete das aber
+    // nur in der Prosa-note — für runUnit war es von "gar kein PR" nicht
+    // unterscheidbar und wurde als technischer Fehler requeued (zweiter
+    // Builder-Lauf, beim identischen Befund Stop des GANZEN Laufs, am Issue
+    // weder Label noch Kommentar). Optional wie die Diagnosefelder des
+    // WAIT_SCHEMA: fehlt es, gilt der Befund wie bisher als "kein PR".
+    ambiguous: { type: 'boolean', description: 'true NUR im Fall aus Schritt 3: mehrere verifizierte OFFENE PRs zum selben Issue — found ist dann false, aber aus einem anderen Grund als "es gibt keinen PR"' },
+    note: { type: 'string' },
+  },
+}
+// Weltzustand des PR statt Agenten-Prosa (Issue #37): die Engine hat weder
+// Datei- noch Bash-Zugriff — jede Prüfung des Weltzustands läuft über agent()
+// mit erzwungenem Schema, sonst wäre die Klassifikation wieder Prosa und nicht
+// deterministisch. checksPending steht bewusst NEBEN grün/rot: ohne diese Zahl
+// gälte ein PR mit einem fertigen grünen und drei laufenden Checks als "grün und
+// fertig" — der Operator bekäme eine Falschaussage und mergte ungeprüft.
+const MERGE_STATE_SCHEMA = {
+  type: 'object', required: ['prState', 'merged', 'checksGreen', 'checksRed', 'checksPending', 'mergeCheckState'], additionalProperties: false,
+  properties: {
+    prState: { type: 'string', description: 'OPEN | CLOSED | MERGED — wörtlich aus gh pr view --json state' },
+    merged: { type: 'boolean', description: 'true NUR, wenn gh pr view --json mergedAt einen Zeitstempel liefert' },
+    checksGreen: { type: 'integer', description: 'Anzahl SUCCESS-Checks' },
+    checksRed: { type: 'integer', description: 'Anzahl FAILURE/ERROR/CANCELLED/TIMED_OUT-Checks' },
+    checksPending: { type: 'integer', description: 'Anzahl noch laufender Checks (IN_PROGRESS/QUEUED/PENDING) — weder grün noch rot, aber "nicht fertig"' },
+    mergeCheckState: { type: 'string', description: 'Zustand des Pflicht-Checks: SUCCESS | FAILURE | PENDING | ABSENT' },
+    note: { type: 'string', description: 'ein Satz Klartext zum Zustand — nie "kein Ergebnis"' },
+  },
 }
 const PREFLIGHT_SCHEMA = {
   type: 'object', required: ['clean'], additionalProperties: false,
@@ -208,11 +352,21 @@ KEIN Code, KEINE Datei-Änderung, KEIN Branch.`
 const buildPrompt = (n, u) => `${PRE}Du bist der IMPLEMENTER für Issue #${n} (Lane: ${u.lane}, Size: ${u.size}). Du arbeitest in einem isolierten Worktree (dein cwd); Feature-Branch nur HIER anlegen, nie den Haupt-Tree anfassen, nie checkout -B. ${setupStep}
 BUDGET: Richtwert maximal ~${budgetFor(u).turns} Turns für Build inkl. lokaler Gates; Opus-Turns zählen ${C.opusTurnWeight || 3}-fach auf den Richtwert (Kontingent-Schutz). Sprengt der Scope das erkennbar, brich ab und melde es klartext im Return-note statt endlos zu iterieren.
 1. gh issue view ${n} -R ${SLUG} --json title,body,labels (Ground Truth, nicht aus Memory) und den Plan-Kommentar ${MARK.plan} lesen, falls vorhanden.
-${learnStep(u)}2. Idempotenz: gh pr list -R ${SLUG} --search "Closes #${n}" --state all — Treffer verifizieren (der Body muss exakt "Closes #${n}" enthalten, die Volltextsuche kann auch #${n}XX-Nummern liefern). Existiert ein GEMERGTER PR, return skipped=true mit note. Existiert ein OFFENER PR: übernimm ihn statt bei null zu beginnen (git fetch origin, git switch auf seinen Branch in DEINEM Worktree; vorhandenen Code, Review-Kommentare und den letzten Stand-Kommentar im Issue lesen, offene Punkte fertigstellen; ist der PR Draft: gh pr ready <NUMMER> -R ${SLUG}). Enthält der PR-Body bereits einen "### Tasks"-Abschnitt: die Liste per gh pr edit <NUMMER> -R ${SLUG} --body FORTSCHREIBEN — jetzt erledigte Punkte abhaken, neu hinzugekommene Punkte anhängen, vorhandene Einträge NIE entfernen, umformulieren oder kürzen (die Liste ist der Fortschrittsnachweis für den Reviewer). Liegen auf dem Branch Commits, die NICHT von dir/diesem Workflow stammen (git log auf Autoren prüfen — ein Mensch hat übernommen): diese Commits sind Ground Truth, darauf aufbauen, nie überschreiben oder umformulieren. Return skipped=false mit dessen pr und branch.
+${learnStep(u)}2. Idempotenz: gh pr list -R ${SLUG} --search "Closes #${n}" --state all — Treffer verifizieren (der Body muss die Zeichenfolge "Closes #${n}" enthalten, rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt; die Volltextsuche liefert auch #${n}XX-Nummern, "Closes #${n}23" ist KEIN Treffer). Priorität unter den verifizierten Treffern — identisch mit der PR-CHECK-Station, die deinen Befund gleich gegenprüft: OFFEN schlägt GEMERGT. Existiert ein OFFENER PR, übernimm ihn, auch wenn daneben ein gemergter liegt (Issue nach einem Merge wiedereröffnet): meldest du hier skipped=true, während gh einen offenen PR ausweist, widersprechen sich beide Stationen und der offene PR bliebe verwaist liegen. Existiert NUR ein gemergter PR und kein offener, return skipped=true mit note. Beim OFFENEN PR: übernimm ihn statt bei null zu beginnen (git fetch origin, git switch auf seinen Branch in DEINEM Worktree; vorhandenen Code, Review-Kommentare und den letzten Stand-Kommentar im Issue lesen, offene Punkte fertigstellen; ist der PR Draft: gh pr ready <NUMMER> -R ${SLUG}; trägt er die Abbruch-Labels eines früheren Laufs, entferne sie jetzt: gh pr edit <NUMMER> -R ${SLUG} --remove-label needs-human --remove-label budget-exceeded — meldet gh dabei, ein Label sei nicht gesetzt, ist das kein Fehler, weitermachen). Enthält der PR-Body bereits einen "### Tasks"-Abschnitt: die Liste per gh pr edit <NUMMER> -R ${SLUG} --body FORTSCHREIBEN — jetzt erledigte Punkte abhaken, neu hinzugekommene Punkte anhängen, vorhandene Einträge NIE entfernen, umformulieren oder kürzen (die Liste ist der Fortschrittsnachweis für den Reviewer). Liegen auf dem Branch Commits, die NICHT von dir/diesem Workflow stammen (git log auf Autoren prüfen — ein Mensch hat übernommen): diese Commits sind Ground Truth, darauf aufbauen, nie überschreiben oder umformulieren. Return skipped=false mit dessen pr und branch.
 3. ${u.lane === 'quick' ? 'Quick-Lane: Skill superpowers:systematic-debugging laden; erst Repro-Test des Fehlers, dann minimaler Fix plus gezielter Regressionstest.' : 'Skill superpowers:test-driven-development laden. TDD: pro Akzeptanzkriterium failing Test zuerst, dann implementieren. Vertikaler Slice, Task-Checkliste des Plans abarbeiten.'}
 4. Lokale Gates (alle müssen grün sein): ${gateCmds}
 5. Skill superpowers:verification-before-completion laden und befolgen (Beweis vor Behauptung). Dann ${PUSH}. gh pr create -R ${SLUG} mit "Closes #${n}" im Body. Existiert ein Plan-Kommentar ${MARK.plan}: dessen Task-Checkliste als Abschnitt "### Tasks" in den PR-Body übernehmen — von dir erledigte Punkte als "- [x]", offene/übersprungene als "- [ ]" (bewusst Übersprungenes mit kurzem Grund dahinter); ohne Plan-Kommentar entfällt der Abschnitt ersatzlos. NICHT mergen, NICHT auf Reviews warten.
-Return: { pr, branch, skipped: false }.`
+Return: { pr, branch, skipped: false } — pr ist die Nummer, die gh für DIESEN PR ausgegeben hat (gh pr create druckt sie in der PR-URL; im Zweifel gh pr view --json number gegen den eigenen Branch gegenchecken), branch der eigene Branchname. Nie raten, nie 0 melden: pr: 0 ist ausschließlich für skipped=true zulässig — ein falscher Wert kostet die Einheit trotz der PR-Check-Station eine ganze Runde.`
+
+// Die Station bekommt bewusst KEINE Behauptung der Bau-Station übergeben: mit
+// claimedPr/claimedBranch im Prompt wäre nicht mehr unterscheidbar, ob sie gh
+// wirklich gefragt oder nur nachgeplappert hat — sie soll ja genau das prüfen.
+const prCheckPrompt = (n) => `${PRE}Du bist die PR-CHECK-Station für Issue #${n}. Du stellst NUR den Weltzustand auf GitHub fest und meldest ihn — kein Code, kein Push, kein Kommentar, kein Merge, keine Label-Änderung.
+1. gh pr list -R ${SLUG} --search "Closes #${n}" --state all --json number,state,body,headRefName
+2. Jeden Treffer am Body verifizieren: er muss die Zeichenfolge "Closes #${n}" enthalten, rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt (die Volltextsuche liefert auch #${n}XX-Nummern; "Closes #${n}23" ist KEIN Treffer). Bleibt kein Treffer übrig: found=false, pr=0, branch="", state="NONE".
+3. Priorität unter den verifizierten Treffern: OPEN vor MERGED vor CLOSED — ein frisch gebauter OFFENER PR schlägt einen alten gemergten, sonst bliebe er verwaist liegen. Bei Gleichstand die höchste Nummer. Mehrere verifizierte OFFENE Treffer sind MEHRDEUTIG: found=false, pr=0, branch="", state="NONE", ambiguous=true, note "mehrdeutig: #a, #b" — welcher gemergt werden soll, ist nicht zu raten. ambiguous ist NUR für diesen Fall da: es unterscheidet "zwei Kandidaten" von "kein Kandidat", die sonst beide als found=false ankämen und gleich behandelt würden.
+4. Kannst du gh nicht ausführen (Tool-Recht fehlt, Kommando bricht ab, Ausgabe unlesbar), ist das KEIN "es gibt keinen PR": found=false, pr=0, branch="", state="NONE" und den Fehlertext WÖRTLICH in note. Eine PR-Nummer NIE raten und NIE aus dem Kontext übernehmen — es zählt ausschließlich, was gh ausgegeben hat.
+Return { found, pr, branch, state, ambiguous, note } — ambiguous nur im Fall aus Schritt 3 true, in jedem anderen Ausgang false.`
 
 const verifyPrompt = (n, pr, u, round) => `${PRE}Du bist der AC-VERIFIER: frischer Kontext, unabhängig vom Implementer. Dein Input ist AUSSCHLIESSLICH: (a) gh issue view ${n} -R ${SLUG} --json title,body und (b) der PR: gh pr view ${pr} -R ${SLUG} und gh pr diff ${pr} -R ${SLUG}.
 Auftrag: WIDERLEGE, dass die Umsetzung jedes Akzeptanzkriterium erfüllt. Pro AC: Urteil erfüllt/verfehlt plus konkreter Beleg (Diff-Stelle, beweisender Test, oder eigenes Nachstellen: eigenen Worktree anlegen mit git fetch origin und git worktree add <tmp-pfad> origin/<pr-branch>, ${SETUP ? `dort zuerst ${SETUP}, dann ` : 'dort '}Tests gezielt ausführen, danach git worktree remove — NIE den Haupt-Tree anfassen, NIE checkout -B).
@@ -239,19 +393,87 @@ const securityPrompt = (n, pr) => `${PRE}Du bist der SECURITY-PASS (geschützter
 // (inkl. erneutem Grün-Warten NACH dem Update — der Branch ist dann wirklich
 // hinter main gewesen, das Re-Warten gehört in den Lock) und den Merge selbst.
 // Ein Merge passiert NIE außerhalb von withMergeLock.
+// Draft-Check und Re-Trigger (Issue #34): die Station wartete bis 0.7.0 blind 45
+// Minuten und hatte danach keinen Befund. Ein Draft-PR kann per Design keinen
+// grünen Pflicht-Check liefern (der prep-Job der Review-Pipeline ist auf
+// draft == false gefiltert, alles Weitere hängt an prep) — das ist eine
+// Verschärfung des Runners gegenüber der Branch-Protection, die einen SKIPPED-Job
+// als erfüllt zählt. Klären kostet Sekunden.
+// Bleiben Läufe ganz aus, ist der Re-Trigger ein BEHIND-Update. Der Operator hat
+// die drei Kandidaten am 2026-08-01 live an PR #576/#580 durchgemessen
+// (Issue-#34-Kommentar): gh pr ready — keine Läufe; leerer Commit plus Push —
+// keine Läufe; git merge origin/<default> plus Push — Läufe binnen Sekunden. Der
+// Draft-Toggle steht deshalb NICHT mehr als Re-Trigger im Prompt (der
+// Draft-CHECK aus Schritt 1 bleibt: ohne ihn wartet die Station auf einen Check,
+// den es per Design nicht geben kann). Das Update läuft OHNE Merge-Lock, und das
+// ist tragbar: es schreibt auf den FEATURE-Branch dieser Einheit, nie auf den
+// Default-Branch — kein Merge findet außerhalb von withMergeLock statt, und der
+// gelesene Default-Branch-Stand darf beliebig alt sein (die Merge-Station prüft
+// BEHIND später erneut). Die Konflikt-Regel ist wörtlich die des gateMergePrompt: nur
+// reine Append-Konflikte werden aufgelöst, alles andere git merge --abort — der
+// Gate-Wait darf nicht weniger vorsichtig sein als der Lock, denn er pusht
+// dasselbe Ergebnis. Der Re-Trigger bleibt auf EINEN gedeckelt, weil eine externe
+// Ursache sich davon nicht heilen lässt. Statt zu werfen liefert die Station bei
+// Nicht-Grün jetzt { green: false, … } — ein geworfener Fehler transportiert nur
+// einen String und keine Diagnosefelder.
 const gateWaitPrompt = (n, pr, branch, u, rounds) => `${PRE}Du bist die GATE-WAIT-Station für PR #${pr} (Issue #${n}). Sie läuft VOR dem Merge-Lock: Du wartest nur auf grüne Checks und fixst Findings — du mergst NIE, führst KEIN gh pr merge aus und machst KEINE Merge-Vorchecks (das übernimmt die Merge-Station danach).
-1. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit — danach Fehler werfen, dessen Text mit "GATE:" beginnt). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'}
-2. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''}: P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget), danach Fehler werfen, dessen Text mit "GATE:" beginnt.
-Return { green: true } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün".`
+1. ZUERST den Draft-Zustand klären, BEVOR du irgendwo wartest: gh pr view ${pr} -R ${SLUG} --json isDraft,headRefOid. Ist isDraft true, liefert die Review-Pipeline per Design keinen grünen Pflicht-Check (ihr prep-Job ist auf draft == false gefiltert, alles Weitere hängt an prep) — darauf zu warten ist aussichtslos: gh pr ready ${pr} -R ${SLUG} ausführen und draftAtEntry: true melden (war er kein Draft: draftAtEntry: false). headRefOid ist der HEAD-SHA des PR; du brauchst ihn in Schritt 3.
+2. Warten bis alle Checks fertig sind: gh pr checks ${pr} -R ${SLUG} --watch (Bash mit großzügigem timeout; bei Timeout erneut, insgesamt maximal 45 Minuten Wartezeit). Bei --json sind Status-Werte GROSS (SUCCESS/FAILURE/IN_PROGRESS).${C.mergeCheck ? ` Ziel: der Check "${C.mergeCheck}" ist SUCCESS.` : ' Ziel: alle Checks SUCCESS.'} SKIPPED oder NEUTRAL zählt hier NIE als grün — genau so wird der Pflicht-Check gemeldet, wenn der prep-Job übersprungen wurde (Draft, aber auch ein bloßes Label-Event am PR). Dann EINMAL den Re-Trigger aus Schritt 3a auslösen; meldet er danach erneut SKIPPED, nicht weiter warten, sondern { green: false } mit der note "Pflicht-Check meldet SKIPPED — Branch-Protection würde mergen, Runner nicht; Operator-Entscheidung".
+3. Meldet gh "no checks reported" oder ist statusCheckRollup leer, wartest du NICHT die vollen 45 Minuten ins Leere: Läufe des Branch holen — gh run list -R ${SLUG} --branch ${branch} --limit 20 --json databaseId,headSha,status,conclusion,workflowName — und davon NUR die mit headSha == <headRefOid aus Schritt 1> zählen; das ist runsFound (bei jedem weiteren Blick aktualisieren, im Return steht der letzte Stand). Ohne diesen Filter zählst du Läufe fremder Commits desselben Branch mit, und in jedem Repo mit mehreren Workflows wäre runsFound immer > 0. Ist runsFound nach rund 10 Minuten immer noch 0, GENAU EINEN Re-Trigger auslösen — den aus Schritt 3a, keinen anderen. Dieser eine Re-Trigger gilt für die ganze Station, auch wenn ihn Schritt 2 (SKIPPED) auslöst. Ist runsFound > 0, erscheint am PR aber kein Check, NICHT re-triggern: das ist ein anderer Befund (Läufe da, Checks nicht am PR verknüpft) und gehört genau so in die note.
+3a. DER RE-TRIGGER IST EIN BEHIND-UPDATE, nichts anderes. Live gemessen (2026-08-01, PR #576/#580): gh pr ready bzw. ein Draft-Toggle löste KEINEN Lauf aus, ein leerer Commit (git commit --allow-empty) plus Push ebenfalls KEINEN — erst ein echtes Update vom ${BRANCH} ließ die Läufe binnen Sekunden anlaufen. Also: KEIN Draft-Toggle (du setzt den PR in dieser Station unter keinen Umständen auf Draft zurück — er bleibt in JEDEM Ausgang ready), KEIN leerer Commit, KEIN gh run rerun (es gibt keinen Lauf, den man wiederholen könnte — Schritt 4a greift nur bei einem ROTEN Lauf). Ablauf: git fetch origin, dann prüfen, ob der Branch ${BRANCH} überhaupt noch nicht enthält — git merge-base --is-ancestor origin/${BRANCH} origin/${branch}; Exit 0 heißt "schon enthalten", der Merge wäre ein No-op, pushte nichts und löste nichts aus: dann NICHT triggern, retriggered: false, Grund in die note, beenden wie in Schritt 6. Sonst eigenen Worktree anlegen (git worktree add <tmp> ${branch}, NIE den Haupt-Tree), git merge origin/${BRANCH} (KEIN rebase, KEIN force, KEIN --allow-empty), via ${PUSH} pushen, git worktree remove, retriggered: true melden und weiterwarten — der PR hat jetzt einen neuen HEAD-SHA, hol ihn dir mit gh pr view ${pr} -R ${SLUG} --json headRefOid neu und zähl runsFound ab hier gegen den NEUEN Wert. Kommt auch danach kein Lauf, liegt die Ursache außerhalb dieses PRs: KEIN zweiter Re-Trigger — beenden wie in Schritt 6.
+3b. KONFLIKT beim BEHIND-Update (git merge origin/${BRANCH} endet non-zero): dieselbe Regel wie in der Merge-Station, keine weichere — du pushst dasselbe Ergebnis, nur ohne Lock. Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt: reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht) — beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 3a. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, git worktree remove (es bleibt NIE ein halb-gemergter Zustand und NIE ein ungeprüfter Merge auf dem Branch zurück), NICHT pushen, retriggered: false, die Konfliktdateien in die note und beenden wie in Schritt 6 — der Konflikt hält später ohnehin die Merge-Station auf und gehört vor einen Menschen, nicht in eine Warteschleife.
+4. Bei FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''} ZUERST diagnostizieren, in welchem Step der Job gescheitert ist — VOR jeder Codeänderung: Run-ID des roten Laufs holen (gh run list -R ${SLUG} --branch ${branch} --limit 10 --json databaseId,workflowName,status,conclusion,headSha; ersatzweise die Run-ID aus dem link-Feld von gh pr checks ${pr} -R ${SLUG} --json name,state,link), dann gh run view <RUN_ID> -R ${SLUG} --json jobs (Name des gescheiterten Jobs UND seines gescheiterten Steps) und gh run view <RUN_ID> -R ${SLUG} --log-failed | tail -n 300 (nur die roten Steps, abgeschnitten, damit dein Kontext nicht überläuft). Ein rein informativer Check, der den Merge nicht blockiert, löst diese Diagnose NICHT aus.
+4a. INFRASTRUKTUR-Fall — er hängt am gescheiterten STEP aus Schritt 4, nie am Volltext des Logs: Infrastruktur ist NUR, was VOR dem eigentlichen Test-/Lint-/Review-Aufruf scheitert (Checkout, Setup-Action, Dependency-Installation, Paketdownload, Runner-Provisionierung — das gilt auch für die Review-Pipeline selbst). Für einen solchen Step ist eine dieser Signaturen im zugehörigen Logauszug ein zusätzlicher Beleg (Teilstring genügt, Groß-/Kleinschreibung egal): ${JSON.stringify(INFRA_SIG)}. Eine Signatur ALLEIN reicht nie: gh run view --log-failed druckt die Ausgabe des gescheiterten Steps im Volltext, und ein legitim fehlschlagender Timeout-Test bringt seine eigene "operation timed out"-Zeile mit — steht die Signatur in der Ausgabe des Test-/Lint-/Review-Aufrufs selbst, ist der Fall INHALTLICH (Schritt 5) und ein Re-Run wiederholt nur denselben roten Test. Einzige Ausnahme: der Runner bricht mitten im Step weg (Meldung über den Runner statt über den Testlauf, der Step endet ohne eigenes Urteil) — das ist Infrastruktur, egal in welchem Step. Das ist KEINE Aussage über den Code — nicht fixen, sondern neu messen: gh run rerun <RUN_ID> --failed -R ${SLUG}, dann zurück zu Schritt 2 und neu werten. Deckel: EIN Re-Run JE ROTEM LAUF und HÖCHSTENS ZWEI in dieser Station — --failed wirkt pro Lauf, und eine Infrastruktur-Störung trifft typischerweise mehrere Workflows gleichzeitig; scheitert derselbe Step nach seinem Re-Run erneut, ist er reproduzierbar und damit ein inhaltlicher Fall (Schritt 5). Diese Re-Runs zählen NICHT auf die ${rounds} Fix-Runde(n) aus Schritt 5 und sind auch bei 0 verbleibenden Fix-Runden erlaubt; die 45-Minuten-Grenze aus Schritt 2 gilt unverändert für die gesamte Wartezeit. Schlägt der Re-Run-Befehl selbst fehl (fehlende Actions-Rechte, Lauf zu alt), NICHT wiederholen und NICHT anderweitig neu starten — dann wie Schritt 5 behandeln und den Grund in die note. Hast du mindestens einmal neu gestartet, gib infraRerun: true zurück.
+5. INHALTLICHER FAILURE${C.mergeCheck ? ` des Checks "${C.mergeCheck}"` : ''} (alles, was Schritt 4a nicht als Infrastruktur ausweist — der Test-/Lint-/Typecheck-Aufruf selbst ist rot oder das Review-Gate meldet Findings): P0/P1-Findings aus dem Review-Sticky-Comment lesen (gh pr view ${pr} -R ${SLUG} --json comments, JSON-Marker im Kommentar) und adressieren: eigener Worktree auf ${branch} (git fetch origin && git worktree add <tmp> ${branch}, nie Haupt-Tree), fixen, ${PUSH}, worktree remove, erneut warten. Maximal ${rounds} Runde(n) (issue-globales Restbudget).
+6. Return { green: true, draftAtEntry, runsFound, retriggered, infraRerun } erst nach einem grünen Durchlauf — nie vorher, nie "vermutlich grün". Wird es nicht grün (45 Minuten um, keine Checks trotz Re-Trigger, Pflicht-Check bleibt SKIPPED oder Runden aufgebraucht): KEINEN Fehler werfen, sondern { green: false, draftAtEntry, runsFound, retriggered, infraRerun, note } zurückgeben, note in EINEM Satz mit dem Grund. Die vier Diagnosefelder IMMER füllen, auch im grünen Fall — der Workflow baut daraus die Meldung, die der Operator im Issue-Kommentar liest. infraRerun nur true, wenn du in Schritt 4a tatsächlich neu gestartet hast.`
 
-const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station für PR #${pr} (Issue #${n}). Sie läuft IM Merge-Lock (andere Einheiten warten auf dich — zügig, keine Nebenaufgaben); die GATE-WAIT-Station hat die Checks bereits grün gemeldet.
-1. Erster grüner Durchlauf = mergen, keine Re-Trigger-Jagd. Vorher: kein ${C.overrideLabel || 'override'}-Label auf dem PR; malformed-tree-Check (git ls-tree -r HEAD | awk '{print $4}' | sort | uniq -d muss leer sein); Checks-Stand gegenprüfen (gh pr checks ${pr} -R ${SLUG} — sind sie entgegen der Wait-Meldung nicht mehr grün, Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt).
+// Post-Merge-Beweis (Issue #32): Bis 0.7.0 war jeder nicht-grüne CI-Lauf auf dem
+// Default-Branch "rot" — auch ein ABGEBROCHENER. Lauf wf_1121fbd9-e9e (2026-08-01,
+// academic-research, parallelism 3): eine concurrency-Regel mit cancel-in-progress
+// auf main ließ den nächsten Merge den Post-Merge-Lauf des vorherigen killen
+// (conclusion "cancelled"), der Runner las das als Fehlschlag, öffnete einen
+// Revert-PR gegen einen fehlerfreien Merge und stoppte den Lauf mit fünf
+// lauffähigen Einheiten in der Queue. main war nie kaputt. Jetzt: (1) Anker ist der
+// eigene Merge-Commit statt "die letzten drei Läufe", (2) conclusion wird erst nach
+// status == completed interpretiert, (3) nur failure/timed_out auf dem eigenen
+// Merge-Commit sind ein Beleg. Ein OBERMENGEN-Lauf (enthält den eigenen Commit plus
+// fremde) darf nur GRÜN bestätigen — sein Rot kann von einem fremden Commit stammen,
+// und ein Revert des eigenen, fehlerfreien Squash-Commits wäre exakt der Schaden aus
+// #32 in neuer Form. Bleibt es unbestimmt, ist das Ergebnis "unmeasured": kein
+// Revert ohne Beleg, kein Stop des Laufs.
+// Merge-Guard gegen Abbruch-Labels (Issue #35): der Draft-Zustand war bis 0.7.0 ein
+// HARTES Merge-Hindernis — gh pr merge verweigert Drafts serverseitig. Das neue
+// Abbruch-Signal (Label needs-human/budget-exceeded statt Draft, siehe
+// budgetStop/needsHumanStop) ist das NICHT: ein Label ist reiner Prompt-Text an das
+// billigste Modell der Pipeline (model: 'haiku'), kein serverseitiges Gate. Schritt 1
+// prüft deshalb den LIVE-Zustand (gh pr view --json labels) statt sich auf einen
+// Kommentar zu verlassen — verlässlich macht das den Merge trotzdem nicht: ein Mensch
+// kann den PR jederzeit von Hand mergen, die einzige Warnung bliebe dann der
+// Abbruchkommentar.
+const gateMergePrompt = (n, pr, branch, u) => `${PRE}Du bist die MERGE-Station für PR #${pr} (Issue #${n}). Sie läuft IM Merge-Lock (andere Einheiten warten auf dich — zügig, keine Nebenaufgaben; Ausnahme: der Post-Merge-Beweis in Schritt 5, für den du bis zu 10 Minuten warten SOLLST — abgekürztes Warten liefert keinen Befund, sondern nur ein stilles "unmeasured"); die GATE-WAIT-Station hat die Checks bereits grün gemeldet.
+1. Erster grüner Durchlauf = mergen, keine Re-Trigger-Jagd. Vorher: kein ${C.overrideLabel || 'override'}-Label auf dem PR; kein needs-human- und kein budget-exceeded-Label auf dem PR (gh pr view ${pr} -R ${SLUG} --json labels — sie sind das Abbruch-Signal eines früheren Laufs; trägt der PR eines davon, NICHT mergen, sondern { merged: false, blocked: "abort-label", postMerge: "unmeasured", note: "<welches Label>" } zurückgeben — der Workflow macht daraus selbst den GATE:-Abbruch. Ein geworfener Fehler mit "GATE:" am Anfang bleibt gleichwertig; was NICHT genügt, ist ein blankes merged: false: das liest der Workflow als "Merge lief nicht" und schickt einen Menschen zum Handmerge genau dieses PR); malformed-tree-Check (git ls-tree -r HEAD | awk '{print $4}' | sort | uniq -d muss leer sein); Checks-Stand gegenprüfen (gh pr checks ${pr} -R ${SLUG} — sind sie entgegen der Wait-Meldung nicht mehr grün, Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt).
 2. Ist der Branch BEHIND ${BRANCH}: in einem eigenen Worktree (git fetch origin && git worktree add <tmp> ${branch}) git merge origin/${BRANCH} in den Branch (KEIN rebase, KEIN force), Ergebnis via ${PUSH} pushen, Worktree entfernen; danach erneut auf Grün warten (gh pr checks ${pr} -R ${SLUG} --watch, INNERHALB dieses Locks, Wartezeit insgesamt maximal 45 Minuten — Timeout oder FAILURE nach dem BEHIND-Update: Fehler werfen, dessen Text mit "GATE:" beginnt; im Lock wird nicht gefixt); max ${Math.max(2, PAR)} Zyklen — BEHIND zählt NIE als inhaltlicher Fehler.
-2b. KONFLIKT-Zweig (git merge origin/${BRANCH} endet non-zero): Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt — reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht): beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 2. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, Worktree entfernen (es bleibt NIE ein halb-gemergter Zustand zurück), dann Fehler werfen, dessen Text mit "GATE: Merge-Konflikt" beginnt und die Konfliktdateien auflistet. Ein wiederkehrender Konflikt zählt auf den Zyklus-Cap aus Schritt 2 und endet als GATE:-Fehler, nie als Endlosschleife.
+2b. KONFLIKT-Zweig (git merge origin/${BRANCH} endet non-zero): Konfliktdateien mit git diff --name-only --diff-filter=U listen. Genau EINE Auflösung ist erlaubt — reiner Append-Konflikt in einer akkumulierenden Datei (Changelog, Liste, Manifest: BEIDE Seiten haben ausschließlich separate Einträge HINZUGEFÜGT, keine Zeile der Gegenseite geändert oder gelöscht): beide Seiten in der von der Datei dokumentierten Reihenfolge behalten, Merge committen, weiter wie in Schritt 2. ALLES ANDERE ist ein semantischer Konflikt — NICHT raten, welche Seite gewinnt: git merge --abort, Worktree entfernen (es bleibt NIE ein halb-gemergter Zustand zurück), dann NICHT mergen, sondern { merged: false, blocked: "conflict", postMerge: "unmeasured", note: "<Konfliktdateien>" } zurückgeben (gleichwertig: einen Fehler werfen, dessen Text mit "GATE: Merge-Konflikt" beginnt und die Konfliktdateien auflistet). Auch hier gilt: ein blankes merged: false ohne blocked meldet dem Operator einen fertigen PR ohne Merge-Freigabe statt eines Konflikts. Ein wiederkehrender Konflikt zählt auf den Zyklus-Cap aus Schritt 2 und endet ebenso, nie als Endlosschleife.
 3. gh pr merge ${pr} --squash --delete-branch -R ${SLUG}.
 4. Unabhängig verifizieren: gh pr view ${pr} -R ${SLUG} --json state,mergedAt — merged gilt NUR, wenn gh es sagt.
-5. Post-Merge-Beweis: gh run list -R ${SLUG} --branch ${BRANCH} --limit 3 abwarten/sichten${C.commands.smoke ? `; Smoke: ${C.commands.smoke}` : ''}. Alles grün → postMergeGreen: true. Sonst postMergeGreen: false UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Grund immer in note.
-Return { merged, postMergeGreen } erst nach Schritt 4/5.`
+5. Post-Merge-Beweis — Anker ist der EIGENE Merge-Commit, nicht "die letzten Läufe". Das Warten in 5b-5e ist zusammen auf 10 Minuten gedeckelt (es liegt im Merge-Lock, siehe Präambel).
+5a. SHA holen: gh pr view ${pr} -R ${SLUG} --json mergeCommit -q .mergeCommit.oid. Kommt nichts zurück, kurz warten und erneut abfragen; bleibt es leer, ist der Befund unbestimmt (5f), nie rot.
+5b. Läufe zu diesem SHA: gh run list -R ${SLUG} --branch ${BRANCH} --limit 20 --json databaseId,headSha,status,conclusion,createdAt,workflowName — davon zählen NUR die mit headSha == <SHA>; das ist exakt dein Stand. Ist noch keiner da, innerhalb des Caps nachfassen (das Merge-Event legt sie erst an).
+5c. status ABWARTEN, bevor du irgendetwas wertest: jeder dieser Läufe muss status == "completed" sein — gh run view <ID> -R ${SLUG} --json status,conclusion wiederholt abfragen (Bash mit großzügigem timeout, bei Timeout erneut), bis der 10-Minuten-Cap erreicht ist. "läuft noch" oder "hängt seit X Minuten" ist KEIN Befund und nie ein Grund für die Policy. Das Warten läuft im Merge-Lock — solange niemand sonst mergt, kann eine concurrency-Regel mit cancel-in-progress deinen Lauf gar nicht erst abbrechen.
+5d. conclusion werten (gh run schreibt sie KLEIN, anders als gh pr checks --json): success = grün. failure oder timed_out = ROT. JEDER andere Wert (cancelled, skipped, neutral, action_required, stale, startup_failure) ist keine Messung, sondern unbestimmt — nicht rot, weiter mit 5e.
+5e. NEUBESTIMMUNG über einen OBERMENGEN-Lauf, nur wenn 5d unbestimmt blieb: git fetch origin, dann aus gh run list -R ${SLUG} --branch ${BRANCH} --limit 20 --json databaseId,headSha,status,conclusion,createdAt den jüngsten Lauf mit status == "completed" nehmen, dessen Commit deinen Merge-Commit ENTHÄLT — Prüfung: git merge-base --is-ancestor <SHA> <headSha> (Exit 0 = enthalten). Dieser Lauf testet deinen Stand PLUS fremde Commits, deshalb gilt er nur in EINE Richtung: conclusion success = grün (dein Stand ist mitgetestet und war in Ordnung). conclusion failure/timed_out ist NICHT dein Befund — der Fehler kann von einem fremden Commit stammen, ein Revert deines fehlerfreien Squash-Commits wäre der teurere Fehler: unbestimmt (5f), NIE rot, NIE Revert. Kein passender Lauf: innerhalb des Caps nachfassen, danach unbestimmt.
+5f. Ergebnis: grün${C.commands.smoke ? ` UND Smoke grün (${C.commands.smoke} — schlägt er fehl, ist das ein echter roter Befund)` : ''} → postMerge: "green". Rot → postMerge: "red" UND die onSmokeFailure-Policy "${C.onSmokeFailure || 'revert'}" ausführen: revert = in eigenem Worktree git revert des Squash-Commits, Revert-PR "revert: #${n}" öffnen (NICHT selbst mergen); p0-issue = gh issue create mit priority/P0 und Befund; pause-cd = nur dokumentieren (Operator-Aktion nötig). Unbestimmt geblieben → postMerge: "unmeasured": KEINE Policy, KEIN Revert, KEIN Issue — bei "unmeasured" ist note PFLICHT (Lauf-ID, headSha und conclusion hinein), sonst steht im Bericht ein stummer Zustand. Grund immer in note.
+Return { merged, postMerge, blocked } erst nach Schritt 4/5 — blocked: "none", wenn du gemergt hast oder es an etwas anderem als Abbruch-Label (1) bzw. semantischem Konflikt (2b) lag. "red" nur mit einem abgeschlossenen Lauf AUF DEINEM EIGENEN Merge-Commit mit conclusion failure/timed_out (oder rotem Smoke) als Beleg — im Zweifel "unmeasured".`
+
+// Merge-Diagnose (Issue #37): liefert die Merge-Station nichts (die Harness kann
+// sie anhalten — agent() gibt dann null zurück) oder meldet sie merged !== true,
+// ist der gelesene PR-Zustand die einzige Ground Truth. Diese Station MERGT
+// NICHTS; nur deshalb löst sie denselben Block nicht ein zweites Mal aus.
+const mergeDiagPrompt = (n, pr) => `${PRE}Du bist die MERGE-DIAGNOSE für PR #${pr} (Issue #${n}). Die Merge-Station hat kein verwertbares Ergebnis geliefert (häufigster Grund: die Harness hat sie angehalten). Du stellst NUR den Tatbestand fest — reines Lesen: KEIN gh pr merge, KEIN Push, KEIN Fix, KEIN Label, KEIN Kommentar, keine Mutation irgendeiner Art.
+1. gh pr view ${pr} -R ${SLUG} --json number,state,mergedAt,isDraft — merged: true NUR, wenn mergedAt einen Zeitstempel trägt; prState wörtlich aus state (OPEN/CLOSED/MERGED).
+2. gh pr checks ${pr} -R ${SLUG} --json name,state — checksGreen = Anzahl SUCCESS, checksRed = Anzahl FAILURE/ERROR/CANCELLED/TIMED_OUT, checksPending = Anzahl IN_PROGRESS/QUEUED/PENDING. Laufende Checks zählen weder grün noch rot, aber sie werden GEZÄHLT: solange einer läuft, ist der PR nicht fertig.${C.mergeCheck ? ` mergeCheckState = Zustand des Pflicht-Checks "${C.mergeCheck}" wörtlich (SUCCESS/FAILURE/PENDING); fehlt er in der Liste: ABSENT.` : ' Ohne konfigurierten Pflicht-Check: mergeCheckState = ABSENT.'}
+3. note: EIN Satz Klartext mit dem, was ein Operator wissen muss — bei roten Checks deren Namen, bei laufenden deren Zahl, sonst der Grund, warum der PR noch offen ist. "kein Ergebnis" ist als note verboten.
+Return { prState, merged, checksGreen, checksRed, checksPending, mergeCheckState, note } — ausschließlich aus der gh-Ausgabe, nie aus Vermutung.`
 
 const learnPrompt = (n, pr, u) => `${PRE}Du bist die LEARNINGS-Station für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert). Du destillierst das ÜBERTRAGBARE Wissen dieser Einheit für spätere Läufe. Du implementierst NICHTS, pushst nichts, kommentierst nichts auf GitHub.
 1. Quellen: gh pr view ${pr} -R ${SLUG} --json title,body,comments und gh pr diff ${pr} -R ${SLUG} (die Review-/AC-Verify-Kommentare sind die ergiebigste Quelle — dort steht, was beim ersten Anlauf schiefging).
@@ -276,13 +498,32 @@ const runUnit = async (u) => {
     // Haiku-Agent selbst, würde der Fehler den Budget-Abbruch zum technischen
     // Fehler umklassifizieren und die Einheit trotz gesprengtem Budget
     // requeuen — das Ergebnis "budgetExceeded" steht aber schon fest.
+    // Signal am PR ohne Draft (Issue #35): siehe needsHumanStop — dasselbe Muster
+    // (Label + idempotenter Abbruchkommentar statt `gh pr ready --undo`).
     try {
-      await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Falls ein offener PR zum Issue existiert (Nummer via gh pr list -R ${SLUG} --search "Closes #${n}" --state open ermitteln): gh pr ready <NUMMER> --undo -R ${SLUG} (auf Draft setzen). 4. ${wtCleanup(n)}`,
+      await agent(`${PRE}BUDGET-ABBRUCH für Issue #${n} (${spent()} Tokens verbraucht, Deckel ${B.tokens}). Stand: ${stand}. Handle exakt und NUR das: 1. gh issue comment ${n} -R ${SLUG}: kurzer Stand (was fertig, was offen, woran gescheitert, Budget überschritten). 2. gh issue edit ${n} -R ${SLUG} --add-label budget-exceeded --remove-label agent-ready. 3. Signal am PR statt Draft-Rücksetzung: offenen PR zum Issue ermitteln — gh pr list -R ${SLUG} --search "Closes #${n}" --state open --json number,body — und JEDEN Treffer gegen den Body verifizieren: er muss die Zeichenfolge "Closes #${n}" enthalten, rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt (die Volltextsuche liefert auch #${n}XX-Nummern; "Closes #${n}23" ist KEIN Treffer, hier würde an einen FREMDEN PR geschrieben). Kein verifizierter Treffer: Schritt überspringen. MEHR ALS EIN verifizierter Treffer: am PR NICHTS ändern — kein Label, kein Kommentar, kein gh pr ready — und stattdessen mit gh issue comment ${n} -R ${SLUG} die Mehrdeutigkeit samt aller Treffer-Nummern melden; welcher PR gemeint ist, ist nicht zu raten. Sonst mit der Nummer <N> des EINEN Treffers: ist er Draft, zuerst gh pr ready <N> -R ${SLUG} zurück auf ready setzen (ein Draft aus einer früheren flowkit-Version oder von Hand darf hier nicht liegen bleiben) — den PR danach NICHT auf Draft zurücksetzen: das würde ihn aus der Review-Pipeline nehmen, und genau deren Urteil wird beim Wiederaufsetzen gebraucht. Existiert am PR schon ein Kommentar mit erster Zeile <!-- flowkit-abort:v1 --> zum selben Grund, nicht erneut kommentieren (Label trotzdem setzen, falls es fehlt); sonst: (a) gh pr edit <N> -R ${SLUG} --add-label budget-exceeded, (b) gh pr comment <N> -R ${SLUG} — erste Zeile exakt <!-- flowkit-abort:v1 -->, darunter knapp der oben genannte Stand (Tokendeckel und Verbrauch nicht wiederholen), was offen ist, und die Zeile "NICHT mergen — Fortsetzung über /flowkit:implement resume.". 4. ${wtCleanup(n)}`,
         { label: `budget-abort #${n}`, phase: 'Implement', model: 'haiku' })
     } catch (e) {
       LOG(`#${n} Budget-Abbruch-Agent fehlgeschlagen (Label/Kommentar evtl. nicht gesetzt): ${e && e.message ? e.message : String(e)}`)
     }
     return { budgetExceeded: true, note: stand }
+  }
+
+  // Extern blockierter Merge (Issue #37): der PR ist nach gh-Befund grün, offen
+  // und fertig, nur der Merge selbst lief nicht. Das ist KEIN inhaltliches
+  // Scheitern — eigener Zustand, eigenes Label, und der PR bleibt unangetastet
+  // (offen, ready), damit ein Mensch ihn nach Freigabe mergt. Wie budgetStop ist
+  // der Admin-Agent abgesichert: sein Ausfall darf den festgestellten Zustand
+  // nicht in einen technischen Fehler und damit in ein Requeue eines fertigen
+  // PR umdeuten.
+  const mergeBlockedStop = async (pr, stand) => {
+    try {
+      await agent(`${PRE}MERGE BLOCKIERT für Issue #${n} (PR #${pr}). Der Merge wurde nicht ausgeführt (typischerweise vom Sicherheitssystem der Harness angehalten); der PR ist nach gh-Befund grün, fertig und offen. Zustand: ${stand}. Du mergst NICHTS: kein gh pr merge, kein Push, kein Fix. Handle exakt und NUR das: 1. gh pr comment ${pr} -R ${SLUG}: "Autonomer Lauf angehalten — Merge nicht ausgeführt." plus den Zustand oben wörtlich plus "PR ist grün und fertig, es fehlt nur die Merge-Freigabe." 2. gh pr edit ${pr} -R ${SLUG} --add-label merge-blocked. 3. gh issue comment ${n} -R ${SLUG}: derselbe Zustand in einem Satz mit Verweis auf PR #${pr}, dazu als Klartext (KEINE Befehlszeilen, weder hier noch sonstwo in deiner Ausgabe) die zwei Wege zurück, die einem MENSCHEN offenstehen: den PR nach Freigabe von Hand mergen, oder am Issue das Label merge-blocked gegen agent-ready tauschen, damit ein späterer Lauf die Einheit erneut aufnimmt. Du selbst gehst KEINEN dieser Wege. 4. gh issue edit ${n} -R ${SLUG} --add-label merge-blocked --remove-label agent-ready. 5. ${wtCleanup(n)} Den PR NICHT schließen, NICHT auf Draft setzen, den Remote-Branch NICHT löschen und keine lokalen Branches dieses Issues löschen — der PR wird von Hand gemergt.`,
+        { label: `merge-blocked #${n}`, phase: 'Implement', model: 'haiku' })
+    } catch (e) {
+      LOG(`#${n} Merge-blockiert-Agent fehlgeschlagen (Label/Kommentar evtl. nicht gesetzt): ${e && e.message ? e.message : String(e)}`)
+    }
+    return { mergeBlocked: true, pr, note: stand }
   }
 
   if (u.lane !== 'quick') {
@@ -292,9 +533,86 @@ const runUnit = async (u) => {
 
   const built = await agent(buildPrompt(n, u), { label: `build #${n}`, phase: 'Implement', model: modelFor('builder', u, false), isolation: 'worktree', schema: PR_SCHEMA })
   if (!built) throw new Error('Builder lieferte kein Ergebnis (Agent-Abbruch)')
-  if (built.skipped) return { skipped: true, note: built.note || '' }
-  const pr = built.pr
-  if (over()) return budgetStop(`nach Build (PR #${pr} offen)`)
+  // Budgetcheck ZUERST, PR-Check danach (Issue #31/#33): ein Builder, der sein
+  // Budget sprengt, hat typischerweise noch gar keinen PR. Liefe die Station
+  // vorher, würde aus einem sauberen budgetExceeded ein technischer Fehler samt
+  // Requeue und Lauf-Stop. Die PR-Nummer im Stand-Text entfällt dafür ersatzlos —
+  // der Budget-Abbruch ermittelt sie ohnehin selbst per gh pr list.
+  // Die Umstellung war gegen die pr-check-Station gerichtet, NICHT gegen den
+  // skipped-Zweig (Review 0.8.0): ein Builder, der ein bereits erledigtes Issue
+  // nur noch bestätigt, hat nichts zu bezahlen, was ein Abbruch retten könnte.
+  // Vorgezogen bekäme genau diese Einheit budget-exceeded, verlöre agent-ready
+  // und machte ihre Abhängigen über deadBlockers dauerhaft blockiert — für ein
+  // Issue, das fertig ist. Der behauptete Skip wird unten ohnehin gegen gh
+  // verifiziert; hält er nicht, bleibt es beim technischen Fehler samt Requeue,
+  // und der bringt ein frisches Einheiten-Budget mit. Übernimmt die Einheit
+  // stattdessen einen offenen PR, kostet die verschobene Prüfung höchstens einen
+  // AC-Verifier-Lauf — der nächste Deckel steht vor dem Gate.
+  if (built.skipped !== true && over()) return budgetStop('nach Build')
+  // Weltzustands-Verifikation (Issue #31, löst #33): ab hier zählt nur, was gh
+  // sagt. Fällt der Bash-Permission-Classifier aus, endet der Builder REGULÄR
+  // mit Prosa und schema-konformem pr:0 bzw. skipped:true — ohne diese Station
+  // liefe die Einheit mit "PR #0" weiter (Befund #33) oder zählte als
+  // Erledigung. Die PR-Nummer kommt deshalb IMMER von hier, nie aus dem
+  // Builder-Return; kein PR heißt: die Bau-Station hat nicht geliefert
+  // (technischer Fehler, kein inhaltliches needs-human).
+  let seen
+  try {
+    seen = await agent(prCheckPrompt(n), { label: `pr-check #${n}`, phase: 'Implement', model: 'haiku', schema: PRCHECK_SCHEMA })
+  } catch (e) {
+    // Eigener Fehlertext statt des durchgereichten Agent-Wurfs: gleiche Folge
+    // (technischer Fehler, Requeue), aber im Bericht von "gh weist keinen PR
+    // aus" unterscheidbar. Den bereits gebauten PR holt der Requeue-Builder über
+    // seinen Idempotenz-Schritt (gh pr list --state all) zurück.
+    throw new Error(`PR-Check-Station ausgefallen: ${e && e.message ? e.message : String(e)}`)
+  }
+  // Gültig ist ein Befund nur vollständig: ein leerer Branchname baute in den
+  // Fix- und Gate-Stationen ein `git worktree add <tmp>` ohne Argument.
+  const prOk = !!seen && seen.found === true && Number.isInteger(seen.pr) && seen.pr > 0 && typeof seen.branch === 'string' && !!seen.branch
+  // Mehrdeutigkeit ist ein inhaltlicher Befund, kein technischer Fehler: zwei
+  // verifizierte OFFENE PRs zum selben Issue sind nur von einem Menschen
+  // auflösbar. Ohne diesen Zweig lief der Fall in "kein PR" — technischer
+  // Fehler, voller Requeue inklusive zweitem Builder-Lauf, beim identischen
+  // zweiten Befund Stop des GANZEN Laufs, und am Issue stand weder Label noch
+  // Kommentar. Als GATE: bekommt der Fall dieselbe GitHub-sichtbare Behandlung
+  // wie der strukturgleiche merge-blocked. needsHumanStop fasst dabei KEINEN der
+  // beiden PRs an — sein Prompt lässt bei mehr als einem verifizierten Treffer
+  // bewusst die Finger vom PR und meldet nur am Issue.
+  if (seen && seen.ambiguous === true) {
+    throw new Error(`GATE: Mehrdeutiger PR-Befund zu Issue #${n}: ${(seen.note) || 'mehrere offene PRs mit "Closes #' + n + '" im Body'} — welcher gemergt werden soll, ist nicht zu raten. Ein Mensch entscheidet: den falschen PR schließen oder die Issue-Referenz aus seinem Body entfernen.`)
+  }
+  if (built.skipped === true) {
+    // OPEN schlägt MERGED — dieselbe Prioritätsregel wie in der pr-check-Station
+    // (Issue nach einem Merge wiedereröffnet, dazu ein offener PR aus einem
+    // needs-human-Lauf). Beide Stationen arbeiteten hier prompt-konform und die
+    // Einheit warf trotzdem: ohne GATE:-Präfix, also technischer Fehler mit
+    // Requeue, dessen zweiter Anlauf dieselbe Konstellation reproduziert und den
+    // Lauf stoppt — mit einem offenen, unangetasteten PR. Der Weltzustand
+    // schlägt die Behauptung der Bau-Station: der offene PR wird übernommen und
+    // ganz normal verifiziert, gegatet und gemergt.
+    if (prOk && seen.state === 'OPEN') {
+      LOG(`#${n} Builder meldete "skipped", gh weist aber PR #${seen.pr} als OPEN aus — der offene PR wird übernommen statt die Einheit zu werfen.`)
+    } else {
+      if (!prOk || seen.state !== 'MERGED') {
+        throw new Error(`Builder meldete "skipped", gh weist zu Issue #${n} aber keinen gemergten PR aus (${(seen && seen.note) || 'kein Treffer'}) — nicht als erledigt verbucht`)
+      }
+      return { skipped: true, pr: seen.pr, note: built.note || seen.note || '' }
+    }
+  }
+  if (!prOk) {
+    throw new Error(`Kein PR zu Issue #${n} auf GitHub nachweisbar (Builder meldete pr=${JSON.stringify(built.pr)}, gh-Befund: ${(seen && seen.note) || 'kein Treffer'}) — die Bau-Station hat nicht geliefert`)
+  }
+  if (seen.state === 'MERGED') {
+    // Gebaut, aber laut gh schon gemergt (fremder Merge dazwischen, Doppelarbeit):
+    // ein zweiter Merge-Versuch auf einem gemergten PR scheitert garantiert.
+    LOG(`#${n} laut gh bereits gemergt (PR #${seen.pr}) — Einheit endet ohne Merge-Versuch.`)
+    return { skipped: true, pr: seen.pr, note: seen.note || `PR #${seen.pr} war bereits gemergt` }
+  }
+  if (seen.state !== 'OPEN') {
+    throw new Error(`PR #${seen.pr} zu Issue #${n} ist ${seen.state}, nicht OPEN — auf einem geschlossenen PR wird nicht weitergearbeitet`)
+  }
+  const pr = seen.pr
+  const prBranch = seen.branch
 
   let verdict = await agent(verifyPrompt(n, pr, u, 0), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   while (verdict && verdict.pass !== true && fixRounds < MAXFIX) {
@@ -303,7 +621,7 @@ const runUnit = async (u) => {
     // Das vorherige verdict-Objekt wandert in die Fix-Runde (Issue #8): der Fixer
     // kennt so die bereits erfüllten ACs und darf sie nicht kippen; der nächste
     // Verifier-Lauf (round > 0) diff't gegen den JSON-Block des Vorgängers.
-    await agent(fixPrompt(n, pr, built.branch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+    await agent(fixPrompt(n, pr, prBranch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
     verdict = await agent(verifyPrompt(n, pr, u, fixRounds), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
   }
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
@@ -315,7 +633,7 @@ const runUnit = async (u) => {
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, built.branch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
+      await agent(fixPrompt(n, pr, prBranch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
       sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
@@ -328,17 +646,89 @@ const runUnit = async (u) => {
   // gemergt wird ausschließlich innerhalb von withMergeLock.
   // Gate-Stationen auf haiku (Token-Sparen, 2026-07-31): Warten, Merge-Kommandos
   // und gh-Verifikation sind mechanisch — die inhaltliche Prüfung ist längst gelaufen.
-  const wait = await agent(gateWaitPrompt(n, pr, built.branch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
-  if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'}`)
-  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, built.branch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
-  if (!gate || gate.merged !== true) throw new Error(`GATE: Gate/Merge fehlgeschlagen: ${(gate && gate.note) || 'kein Ergebnis'}`)
+  const wait = await agent(gateWaitPrompt(n, pr, prBranch, u, Math.max(0, MAXFIX - fixRounds)), { label: `gate-wait #${n}`, phase: 'Implement', model: 'haiku', schema: WAIT_SCHEMA })
+  // VOR dem Wurf bilden (Issue #34): der GATE:-String ist der einzige Draht zum
+  // Operator (Issue-Kommentar via needsHumanStop, done[].note im Lauf-Bericht) —
+  // ohne den Anhang bliebe die Diagnose im Agent-Return stecken. Wirft der Agent
+  // selbst, wird diese Zeile nie erreicht und die Meldung hat keinen
+  // Diagnose-Block; das ist der bewusst degradierte Pfad.
+  const gateDiag = gateDiagOf(wait)
+  // Ausnahme vom maxFixRounds-Automaten sichtbar machen (Issue #36): der
+  // Operator soll die flakige CI seines Zielrepos im Lauf-Protokoll sehen, ohne
+  // dass eine Einheit dafür bestraft wurde. Bewusst OHNE Runden-Zahl — die
+  // Station meldet nicht zurück, wie viele Fix-Runden sie intern verbraucht hat,
+  // fixRounds wäre hier systematisch zu niedrig.
+  if (gateDiag.infraRerun) LOG(`#${n} Gate-Wait: CI-Infrastruktur-Re-Run (gh run rerun --failed) war nötig — er zählt NICHT auf maxFixRounds.`)
+  if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'} ${gateDiagText(gateDiag)}`)
+  // "Keine weiteren Merges" (Spec §7.5) gilt auch für Einheiten, die beim roten
+  // Post-Merge-Beweis schon in der Merge-Kette hingen: `stopped` bremst nur den
+  // Start NEUER Einheiten (while (!stopped) im worker), die geparkten mergten
+  // fröhlich weiter, während der Revert-PR offenstand. Der Beweis wartet bis zu
+  // zehn Minuten IM Lock — genau das Fenster, in dem bei parallelism > 1 die
+  // fertigen Einheiten auflaufen. Prüfen UND setzen passieren deshalb INNERHALB
+  // der Kette: der Worker notiert den Stop-Grund erst nach Cleanup und
+  // Learnings, da läuft der nächste Merge längst. Nur der rote Post-Merge hält
+  // Merges an — ein Breaker- oder Doppelfehler-Stop darf eine fertige, grün
+  // geprüfte Einheit sehr wohl noch zu Ende mergen.
+  const gate = await withMergeLock(async () => {
+    if (mergeHalt) throw new Error(`GATE: Merge nicht ausgeführt — ${mergeHalt}`)
+    const g = await agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA })
+    if (g && g.postMerge === 'red') mergeHalt = `der Lauf ist angehalten, weil der Post-Merge-Beweis für #${n} (PR #${pr}) rot war${g.note ? `: ${g.note}` : ''}`
+    return g
+  })
+  let mergeNote = (gate && gate.note) || ''
+  let mergePost = gate ? gate.postMerge : 'unmeasured'
+  let postMergeUnverified = false
+  if (!gate || gate.merged !== true) {
+    // Bewusst NICHT gemergt (Review 0.8.0): Abbruch-Label am PR oder
+    // semantischer Merge-Konflikt. Diese beiden Gründe stehen VOR der
+    // Merge-Diagnose, weil sie ihr strukturell entgehen — sie liest state,
+    // mergedAt und Checks, nicht Labels und nicht die Mergebarkeit. Ein
+    // label-blockierter PR sieht für sie aus wie ein fertiger PR ohne
+    // Merge-Freigabe, und der Operator bekäme wörtlich "PR ist grün und fertig"
+    // zu lesen — also die Aufforderung, genau den PR von Hand zu mergen, den ein
+    // früherer Lauf als nicht mergbar markiert hat. Bis 0.7.0 lief jedes
+    // merged !== true in denselben GATE:-Wurf; diese Zeilen holen die Absicherung
+    // für die zwei Fälle zurück, die nicht am Weltzustand ablesbar sind.
+    if (gate && (gate.blocked === 'abort-label' || gate.blocked === 'conflict')) {
+      throw new Error(`GATE: Merge bewusst nicht ausgeführt (${gate.blocked === 'abort-label' ? 'Abbruch-Label needs-human/budget-exceeded am PR' : 'semantischer Merge-Konflikt'}) — PR #${pr}${mergeNote ? `: ${mergeNote}` : ''}. Der PR wird NICHT von Hand gemergt, bevor ein Mensch den Grund geklärt hat.`)
+    }
+    // Ground Truth ist gh, nicht das Agent-JSON (Issue #37): die Merge-Station
+    // kann angehalten worden sein (agent() liefert dann null) oder erst NACH dem
+    // `gh pr merge` abgebrochen sein. Erst der gelesene PR-Zustand entscheidet,
+    // ob hier ein inhaltliches Scheitern, ein extern blockierter Merge oder in
+    // Wahrheit ein Erfolg vorliegt. "kein Ergebnis" landet nie mehr im Issue.
+    const diag = await agent(mergeDiagPrompt(n, pr), { label: `merge-diag #${n}`, phase: 'Implement', model: 'haiku', schema: MERGE_STATE_SCHEMA })
+    if (!diag) throw new Error(`GATE: Merge ohne Ergebnis, Merge-Diagnose für PR #${pr} ebenfalls ohne Ergebnis — Zustand unbekannt${mergeNote ? `; Meldung der Merge-Station: ${mergeNote}` : ''}`)
+    const stand = `PR #${pr} (${diag.prState}): merged=${diag.merged}, Checks grün ${diag.checksGreen} / rot ${diag.checksRed} / laufend ${diag.checksPending}, Pflicht-Check ${C.mergeCheck || '(keiner)'}=${diag.mergeCheckState}${diag.note ? `; ${diag.note}` : ''}${mergeNote ? `; Meldung der Merge-Station: ${mergeNote}` : '; die Merge-Station lieferte keine Meldung'}`
+    if (diag.merged === true) {
+      // Der Merge hat stattgefunden, nur die Rückmeldung fehlte. Die Einheit als
+      // gescheitert zu führen wäre falsch und würde ihre Abhängigen mit töten.
+      // GRÜN ist der Stand deshalb trotzdem nicht: die Diagnose liest den PR,
+      // nicht den Post-Merge-Lauf auf dem Default-Branch. Also 'unmeasured' plus
+      // ein eigenes Berichtsfeld, statt eine Messung zu behaupten, die niemand
+      // gemacht hat — die onSmokeFailure-Zusage bleibt so unangetastet.
+      mergeNote = `Merge nachträglich per gh verifiziert, Post-Merge-Beweis NICHT gelaufen: ${stand}`
+      mergePost = 'unmeasured'
+      postMergeUnverified = true
+      LOG(`#${n} Merge-Station ohne Ergebnis, gh weist den Merge aber aus — Einheit gilt als gemergt, der Post-Merge-Beweis fehlt: ${stand}`)
+    } else if (diag.prState === 'OPEN' && diag.checksRed === 0 && diag.checksPending === 0 && (C.mergeCheck ? diag.mergeCheckState === 'SUCCESS' : diag.checksGreen > 0)) {
+      // checksPending === 0 gehört in die Bedingung, nicht in die Kosmetik: ohne
+      // sie behauptete der Kommentar am PR "grün und fertig", während drei
+      // Checks noch laufen — der Operator mergte einen ungeprüften PR von Hand.
+      LOG(`#${n} Merge extern blockiert (PR grün, Merge nicht ausgeführt): ${stand}`)
+      return mergeBlockedStop(pr, stand)
+    } else {
+      throw new Error(`GATE: Merge fehlgeschlagen — ${stand}`)
+    }
+  }
 
   // Erfolgs-Cleanup (Erstlauf-Befund 2026-07-26): isolation:'worktree' räumt nur
   // UNVERÄNDERTE Worktrees auf — nach einem Build bleiben Worktree + lokaler
   // Feature-Branch liegen (Drift-Quelle). Best-effort, außerhalb des Merge-Locks;
   // darf den Einheit-Erfolg nie kippen.
   try {
-    await agent(`${PRE}POST-MERGE-CLEANUP für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert, Remote-Branch bereits gelöscht). NUR aufräumen, nichts implementieren: 1. ${CLEANUP_SH ? `bash "${CLEANUP_SH}" --branch ${built.branch} (entfernt deterministisch nur Worktrees mit exakt diesem Branch; keine eigenen worktree-remove/prune-Aufrufe zusätzlich)` : `git worktree list — jeden Worktree, dessen Branch ${built.branch} ist, mit git worktree remove --force entfernen`}. 2. git branch -D ${built.branch} (existiert er nicht mehr, ok).${CLEANUP_SH ? '' : ' 3. git worktree prune.'} Haupt-Tree (${BRANCH}) und fremde Worktrees/Branches NICHT anfassen.`,
+    await agent(`${PRE}POST-MERGE-CLEANUP für Issue #${n} (PR #${pr} ist gemergt und gh-verifiziert, Remote-Branch bereits gelöscht). NUR aufräumen, nichts implementieren: 1. ${CLEANUP_SH ? `bash ${shArg(CLEANUP_SH)} --branch ${prBranch} (entfernt deterministisch nur Worktrees mit exakt diesem Branch; keine eigenen worktree-remove/prune-Aufrufe zusätzlich)` : `git worktree list — jeden Worktree, dessen Branch ${prBranch} ist, mit git worktree remove --force entfernen`}. 2. git branch -D ${prBranch} (existiert er nicht mehr, ok).${CLEANUP_SH ? '' : ' 3. git worktree prune.'} Haupt-Tree (${BRANCH}) und fremde Worktrees/Branches NICHT anfassen.`,
       { label: `cleanup #${n}`, phase: 'Implement', model: 'haiku' })
   } catch (e) {
     LOG(`#${n} Post-Merge-Cleanup übersprungen: ${e && e.message ? e.message : String(e)}`)
@@ -355,10 +745,27 @@ const runUnit = async (u) => {
       LOG(`#${n} Learnings-Destillat übersprungen: ${e && e.message ? e.message : String(e)}`)
     }
   }
-  return { pr, fixRounds, postMergeRed: gate.postMergeGreen === false, note: gate.note || '' }
+  // Unbekannter/fehlender Wert fällt bewusst auf 'unmeasured', nicht auf 'red':
+  // ohne Beleg wird nicht revertet und nicht gestoppt (Issue #32).
+  // Quelle ist mergePost/mergeNote, nicht mehr gate.* (Issue #37): `gate` darf
+  // hier null sein — die Merge-Diagnose hat den Merge dann nachträglich belegt.
+  const pm = ['green', 'red', 'unmeasured'].includes(mergePost) ? mergePost : 'unmeasured'
+  if (pm !== mergePost) LOG(`#${n} Merge-Station lieferte postMerge=${JSON.stringify(mergePost)} — als "unmeasured" gewertet (kein Revert ohne Beleg).`)
+  // note ist bei 'unmeasured' die EINZIGE operator-sichtbare Evidenz; das Schema
+  // kann sie nicht erzwingen (required würde die anderen zwei Zustände mitfangen),
+  // deshalb hier ein Ersatztext statt eines stummen Eintrags im Bericht.
+  const gateNote = mergeNote || (pm === 'unmeasured' ? 'unmeasured ohne Begründung der Merge-Station' : '')
+  // gateDiag auch im Erfolgsfall: ein Draft, den die Station stillschweigend
+  // geheilt hat, wäre sonst der häufigste Fall OHNE jede Spur im Bericht.
+  // postMergeUnverified trennt "Beweis gelaufen, unbestimmt" von "Beweis lief
+  // gar nicht" — beides steht als postMerge: 'unmeasured' im Bericht.
+  return { pr, fixRounds, gateDiag, postMerge: pm, note: gateNote, postMergeUnverified }
 }
 
 let mergeChain = Promise.resolve()
+// Gesetzt von der Merge-Station selbst, noch im Lock (siehe runUnit): ab dem
+// ersten belegt roten Post-Merge-Lauf darf keine geparkte Einheit mehr mergen.
+let mergeHalt = null
 const withMergeLock = (fn) => {
   const run = mergeChain.then(fn, fn)
   mergeChain = run.then(() => {}, () => {})
@@ -372,7 +779,21 @@ const failed = []
 const blocked = []
 const deferredByBudget = []
 let stopped = null
-const inFlightAreas = new Set()
+// Zähler statt Set: bei parallelism > 1 laufen zwei Einheiten derselben Area
+// durchaus gleichzeitig — der Fallback in pickNext lässt das bewusst zu, weil
+// die Area-Serialisierung eine Optimierung ist und keine Korrektheitsregel. Ein
+// Set gab die Area schon nach der ERSTEN Fertigmeldung frei, obwohl Geschwister
+// noch bauten; die Präferenz zog danach eine gleich-Area-Einheit vor eine
+// Einheit einer wirklich freien Area — also genau die Kollision, die sie
+// verhindern soll.
+const inFlightAreas = new Map()
+const areaEnter = (a) => { if (a) inFlightAreas.set(a, (inFlightAreas.get(a) || 0) + 1) }
+const areaLeave = (a) => {
+  if (!a) return
+  const rest = (inFlightAreas.get(a) || 0) - 1
+  if (rest > 0) inFlightAreas.set(a, rest)
+  else inFlightAreas.delete(a)
+}
 const inFlightIssues = new Set()
 const inRun = new Set(units.map((u) => u.n))
 // doneOk = in DIESEM Lauf sauber erledigt (merged oder bereits erledigt) — nur das
@@ -442,9 +863,46 @@ const pickNext = () => {
 }
 
 // Inhaltlicher Gate-Fail: Einheit stoppt (needs-human), der LAUF fährt fort (Spec §6).
+// Der übergebene Grund geht WÖRTLICH in den Issue-Kommentar (Issue #34): er trägt
+// seit 0.8.0 die Diagnose der Gate-Station (Draft-Zustand, Lauf-Zahl, Re-Trigger),
+// und die alte Klammer "maxFixRounds erschöpft bzw. Gate nicht grün" lud den
+// Haiku-Agenten dazu ein, genau diese Felder zu einer der zwei Floskeln zu
+// paraphrasieren — der Operator startete dann wieder bei null.
+// Signal am PR ohne Draft (Issue #35): bis 0.7.0 setzte dieser Agent den offenen
+// PR per `gh pr ready --undo` auf Draft — genau das nimmt ihm die
+// Deep-Review-Pipeline (ihr prep-Job ist auf draft == false gefiltert), also das
+// Urteil, das der Mensch beim Übernehmen braucht. Das Signal "nicht mergen"
+// wandert deshalb auf ein Label plus einen idempotenten Abbruchkommentar; ein
+// vorgefundener Draft eines FRÜHEREN Laufs wird geheilt (`gh pr ready <N>`, ohne
+// --undo), der PR selbst bleibt in jedem Ausgang ready.
 const needsHumanStop = async (u, reason) => {
-  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: kurzer Stand + Grund (maxFixRounds erschöpft bzw. Gate nicht grün). 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Offenen PR zum Issue (gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open) auf Draft setzen (gh pr ready <N> --undo -R ${SLUG}). 4. ${wtCleanup(u.n)} Lokale Feature-Branches dieses Issues OHNE offenen PR mit git branch -D löschen.`,
+  await agent(`${PRE}EINHEIT-STOPP (needs-human) für Issue #${u.n}. Grund: ${reason}. Handle exakt und NUR das: 1. gh issue comment ${u.n} -R ${SLUG}: den oben übergebenen Grund WÖRTLICH übernehmen (vollständig, inklusive Klammerzusätze — nicht zusammenfassen, nicht umformulieren), danach EIN Satz Stand. 2. gh issue edit ${u.n} -R ${SLUG} --add-label needs-human --remove-label agent-ready. 3. Signal am PR statt Draft-Rücksetzung: offenen PR zum Issue ermitteln — gh pr list -R ${SLUG} --search "Closes #${u.n}" --state open --json number,body — und JEDEN Treffer gegen den Body verifizieren: er muss die Zeichenfolge "Closes #${u.n}" enthalten, rechts durch eine Nicht-Ziffer oder das Zeilenende begrenzt (die Volltextsuche liefert auch #${u.n}XX-Nummern; "Closes #${u.n}23" ist KEIN Treffer — hier wird an einen FREMDEN PR geschrieben, ein Fehltreffer wäre teuer). Kein verifizierter Treffer: Schritt überspringen. MEHR ALS EIN verifizierter Treffer: am PR NICHTS ändern — kein Label, kein Kommentar, kein gh pr ready — und stattdessen mit gh issue comment ${u.n} -R ${SLUG} die Mehrdeutigkeit samt aller Treffer-Nummern melden; welcher PR gemeint ist, ist nicht zu raten. Sonst mit der Nummer <N> des EINEN Treffers: ist er Draft, zuerst gh pr ready <N> -R ${SLUG} zurück auf ready setzen (ein Draft aus einer früheren flowkit-Version oder von Hand darf hier nicht liegen bleiben) — den PR danach NICHT auf Draft zurücksetzen: ein Draft-PR wird von der Review-Pipeline übersprungen, und der Mensch, der übernimmt, bekäme sonst weder Review-Urteil noch Findings. Existiert am PR schon ein Kommentar mit erster Zeile <!-- flowkit-abort:v1 --> zum selben Grund, nicht erneut kommentieren (Label trotzdem setzen, falls es fehlt); sonst: (a) gh pr edit <N> -R ${SLUG} --add-label needs-human, (b) gh pr comment <N> -R ${SLUG} — erste Zeile exakt <!-- flowkit-abort:v1 -->, darunter knapp der oben genannte Grund in einem Satz, was fertig und was offen ist, und die Zeile "NICHT mergen, bis ein Mensch entschieden hat.". 4. ${wtCleanup(u.n)} Lokale Feature-Branches dieses Issues OHNE offenen PR mit git branch -D löschen.`,
     { label: `needs-human #${u.n}`, phase: 'Implement', model: 'haiku' })
+}
+
+// Fortschritts-Circuit-Breaker (Issue #31): der auslösende Lauf startete 23
+// Einheiten und erzeugte keinen einzigen PR. Jede Einheit scheiterte für sich,
+// keine Regel griff über Einheiten HINWEG. Deshalb ein laufweiter Zähler: nur ein
+// Merge oder eine gh-verifizierte Erledigung setzt ihn zurück.
+// Gezählt wird ausschließlich der ENDGÜLTIGE Ausgang einer Einheit — needs-human,
+// Budget-Abbruch, extern blockierter Merge, zweiter technischer Fehlversuch. Eine
+// Einheit, die nach einem transienten technischen Fehler wieder in der Queue
+// steht, hat noch gar keinen Ausgang und zählt nicht; sonst schlüge der Breaker
+// den Retry tot, den derselbe Runner zwei Zeilen vorher anordnet.
+// Blockierte Einheiten zählen ebenfalls nicht — sie laufen nie an und kosten
+// nichts. Der !stopped-Guard lässt einen bereits gesetzten Stop-Grund (Post-Merge
+// rot, zweiter technischer Fehler) gewinnen; Lesen und Schreiben von noProgress
+// passieren synchron ohne dazwischenliegendes await, und jeder Aufrufer meldet,
+// sobald der Ausgang feststeht — nicht erst nach dem Admin-Agenten. Sonst hinge
+// die Zählreihenfolge bei parallelism > 1 an der Laufzeit der Aufräum-Stationen.
+let noProgress = 0
+const noteOutcome = (progressed, u, why) => {
+  if (progressed) { noProgress = 0; return }
+  noProgress += 1
+  if (PROGRESS_STOP > 0 && noProgress >= PROGRESS_STOP && !stopped) {
+    stopped = { issue: u.n, reason: `Fortschritts-Circuit-Breaker: ${noProgress} Einheit(en) in Folge ohne Merge (progressStopAfter=${PROGRESS_STOP}), zuletzt #${u.n}: ${why}` }
+    LOG(`STOP: ${noProgress} Einheiten in Folge ohne Fortschritt (kein PR, kein Merge) — der Lauf hält an, statt die Queue leerzubrennen.`)
+  }
 }
 
 // Cleanup im Fehlerpfad (Spec §8: Cleanup ist Teil JEDER Abbruch-Routine).
@@ -458,20 +916,35 @@ const worker = async () => {
     const u = pickNext()
     if (u === WAIT) { await waitProgress(); continue }
     if (!u) return
-    if (u.area) inFlightAreas.add(u.area)
+    areaEnter(u.area)
     const start = TOKEN_MODE === 'delta' ? budget.spent() : 0
     try {
       const res = await runUnit(u)
       const tokens = TOKEN_MODE === 'delta' ? budget.spent() - start : null
       done.push(Object.assign({ issue: u.n, tokens, size: u.size }, res))
       // Dependency-Buchführung: ein Budget-Abbruch ist KEINE Erledigung — die
-      // Arbeit ist nicht gemergt, Abhängige dürfen darauf nicht aufsetzen.
-      if (res.budgetExceeded) unresolved.add(u.n)
+      // Arbeit ist nicht gemergt, Abhängige dürfen darauf nicht aufsetzen. Für
+      // einen extern blockierten Merge gilt dasselbe (Issue #37): der Code liegt
+      // nicht auf dem Default-Branch, ein Abhängiger baute gegen etwas, das es
+      // dort nicht gibt.
+      if (res.budgetExceeded || res.mergeBlocked) unresolved.add(u.n)
       else doneOk.add(u.n)
-      LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
-      if (res.postMergeRed) {
+      LOG(`#${u.n} fertig (${res.budgetExceeded ? 'BUDGET' : res.mergeBlocked ? 'MERGE-BLOCKIERT' : res.skipped ? 'skip' : 'merged'})${tokens != null ? `, ${tokens} Tokens` : ''}`)
+      // Ein Merge und eine gh-verifizierte Erledigung setzen den Zähler zurück,
+      // ein Budget-Abbruch zählt hoch: er hat Tokens verbrannt, aber nichts
+      // gemergt. Drei davon in Folge heißen "die Budgets sind falsch kalibriert".
+      // Ein blockierter Merge zählt ebenfalls hoch (Issue #37): eine
+      // Harness-seitige Blockade ist systemisch, nicht PR-spezifisch — sitzt sie
+      // einmal, endet JEDE Einheit so, jede nach vollem Build und Gate. Nach
+      // progressStopAfter solchen Einheiten hält der Lauf an, statt sein Budget
+      // für einen Zustand zu verbrennen, der nach der ersten feststand.
+      noteOutcome(!res.budgetExceeded && !res.mergeBlocked, u,
+        res.mergeBlocked ? `Merge extern blockiert: ${res.note || ''}` : `Budget-Abbruch ohne Merge: ${res.note || ''}`)
+      if (res.postMerge === 'red') {
         stopped = { issue: u.n, reason: `Post-Merge rot (Policy ${C.onSmokeFailure || 'revert'} ausgeführt): ${res.note}` }
         LOG(`STOP: Post-Merge-Beweis für #${u.n} fehlgeschlagen — keine weiteren Merges (Spec §7.5).`)
+      } else if (res.postMerge === 'unmeasured') {
+        LOG(`#${u.n} Post-Merge-Lauf ohne verwertbares Urteil (abgebrochen/übersprungen oder nur über einen Obermengen-Lauf sichtbar) — keine onSmokeFailure-Policy, kein Stop, Lauf fährt fort: ${res.note}`)
       }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)
@@ -480,10 +953,19 @@ const worker = async () => {
       // GESAMTEN Lauf crashen (kein Report, restliche Einheiten laufen nie) —
       // die Buchführung (unresolved/done/failed) muss auch dann stimmen.
       if (msg.startsWith('GATE:')) {
+        // needs-human bleibt ein Einheit-Stopp, der den Lauf einzeln nie anhält —
+        // aber eine SERIE davon ist genau das Muster, das der Breaker abfängt.
+        // Gezählt wird, sobald der Ausgang FESTSTEHT, nicht nach der
+        // GitHub-Nachbereitung: lag der Increment hinter `await
+        // needsHumanStop(...)`, sortierten sich Misserfolge bei parallelism > 1
+        // hinter Erfolge (der Erfolgspfad meldet synchron), und derselbe
+        // Ausgangsverlauf hielt einen gesunden Lauf an — nur weil mehr Worker
+        // liefen. parallelism 3 ist der ausgelieferte Default.
+        noteOutcome(false, u, msg)
         try {
           await needsHumanStop(u, msg)
         } catch (e2) {
-          LOG(`#${u.n} needs-human-Agent fehlgeschlagen (Label/Draft evtl. nicht gesetzt): ${e2 && e2.message ? e2.message : String(e2)}`)
+          LOG(`#${u.n} needs-human-Agent fehlgeschlagen (Label/Abbruchkommentar evtl. nicht gesetzt): ${e2 && e2.message ? e2.message : String(e2)}`)
         }
         unresolved.add(u.n)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
@@ -501,12 +983,25 @@ const worker = async () => {
           failed.push(u.n)
           unresolved.add(u.n)
           LOG(`STOP an #${u.n}: zweiter technischer Fehler. Operator entscheidet.`)
+          // Nur der ENDGÜLTIGE Fehlschlag ist eine abgeschlossene Einheit ohne
+          // Merge. Der erste technische Fehler ist per Definition dieses Runners
+          // transient — er räumt auf und baut die Einheit neu. Zählte der Breaker
+          // ihn mit, entwertete er den eigenen Retry: drei Einheiten, die je
+          // EINMAL an einer Netz-/Classifier-Zuckung scheitern, hielten einen
+          // Lauf an, den 0.7.0 vollständig durchgemergt hätte — ohne Opt-in, in
+          // jedem Bestandsrepo. Der Schutz gegen den auslösenden Vorfall bleibt:
+          // needs-human, Budget-Abbruch und merge-blocked sind abgeschlossene
+          // Ausgänge und zählen sofort, und die Serie technischer Fehler endet
+          // spätestens hier am zweiten Fehlversuch derselben Einheit.
+          // Nach dem Stop-Block: der !stopped-Guard lässt den konkreten Grund
+          // (zweiter Fehler dieser Einheit) gegen den Breaker-Text gewinnen.
+          noteOutcome(false, u, msg)
         } else {
           queue.push(u)
         }
       }
     } finally {
-      if (u.area) inFlightAreas.delete(u.area)
+      areaLeave(u.area)
       inFlightIssues.delete(u.n)
       notifyProgress()
     }
@@ -529,6 +1024,12 @@ if (PAR > 1) {
   await worker()
 }
 
+// Kein neues Top-Level-Feld im Return: needsHuman und budgetExceeded leben
+// ebenfalls nur als Flag im done-Eintrag; failed/blocked stehen top-level, weil
+// jene Einheiten NICHT in done stehen. Zwei Quellen der Wahrheit wären teurer
+// als diese eine Log-Zeile.
+const mergeBlockedIssues = done.filter((d) => d.mergeBlocked).map((d) => d.issue)
+if (mergeBlockedIssues.length) LOG(`flowkit: ${mergeBlockedIssues.length} Einheit(en) extern merge-blockiert — PR grün und fertig, nur der Merge fehlt (Label merge-blocked; nach Freigabe von Hand mergen oder das Label gegen agent-ready tauschen): ${JSON.stringify(mergeBlockedIssues)}`)
 if (blocked.length) LOG(`flowkit: ${blocked.length} Einheit(en) dauerhaft blockiert (Blocker offen bzw. im Lauf gescheitert): ${JSON.stringify(blocked)}`)
 
 return { done, stopped, remaining: queue.map((u) => u.n), failed, blocked, deferredByBudget, parallelism: PAR, tokenMode: TOKEN_MODE, runCap: TOKEN_MODE === 'run' ? runCap : null }

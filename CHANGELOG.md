@@ -8,6 +8,284 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-02
+
+### Added
+- `pr-check` station: right after the builder the runner asks GitHub itself
+  (`gh pr list --search "Closes #<n>" --state all`) and takes PR number, branch
+  and state from that answer. Every later station works off the verified PR.
+  Ambiguous matches, a closed PR and an empty branch name are all treated as
+  "no usable result". (#31, #33)
+- Progress circuit breaker: a run now stops after `progressStopAfter`
+  consecutive units that finished without a merge (needs-human, budget abort,
+  externally blocked merge, or the second technical attempt of the same unit); a
+  merge or a gh-verified skip resets the counter, blocked units and requeued
+  transient first failures do not count. Default 3, `0` disables it. (#31)
+- Merge diagnosis station and the new `merge-blocked` state: when the merge
+  station returns nothing (the harness can stop an unattended merge) or reports
+  `merged != true`, a read-only station reads the real PR state — `state`,
+  `mergedAt`, green/red/pending check counts and the configured `mergeCheck` —
+  before the unit is judged. The scheduler, not the agent, then picks one of
+  three outcomes: a merge gh confirms counts as a success, but the post-merge
+  proof did not run, so the unit reports `postMerge: "unmeasured"` plus
+  `postMergeUnverified: true` rather than claiming green; a PR that is open,
+  green and finished (no red and no pending check) becomes `merge-blocked` —
+  label and comment on issue and PR, the PR stays open and ready, the run
+  continues, dependents do not start; everything else stays `needs-human`, now
+  carrying the state that was read instead of "kein Ergebnis". A blocked merge
+  counts as no progress for the circuit breaker, because a harness-side block is
+  systemic rather than PR-specific. New report fields: `done[].mergeBlocked` and
+  `done[].postMergeUnverified`. `/flowkit:setup` creates the `merge-blocked`
+  label (existing repos need to re-run it, otherwise the label call fails
+  silently and the state only shows up in the run report); `/flowkit:status`
+  lists the queue and a new `merge-blocked` / `post-merge-unmeasured` tally, and
+  the SessionStart hook points at a manual merge instead of a resume. (#37)
+- Pin registry test: every `uses: anthropics/claude-code-action@…` line in the
+  CI template must be byte-identical to one canonical, SHA-pinned line, and a
+  separate check rejects a moving tag (`@v1`, `@main`, …) at any of those
+  positions. CI also resolves the pinned SHA against its version comment
+  upstream and warns (non-blocking) once a newer tag exists. Pins drifting
+  apart or a half-finished bump now fail the build instead of going unnoticed
+  for 46 patch releases, which is what happened before this fix. (#38)
+- `.gitignore` guard: `/flowkit:setup` step 7 now runs
+  `scripts/gitignore-guard.sh`, which asks `git check-ignore --no-index` whether
+  `.claude/flowkit-version`, `.claude/settings.json`,
+  `.claude/workflow.config.json` and `.claude/hooks/*.sh` are ignored, writes
+  the required negations as one marker-delimited, root-anchored block
+  (`# >>> flowkit` … `# <<< flowkit`), re-checks afterwards and reports every
+  path that stays ignored (exit 3) instead of claiming success. In repos that
+  ignore `.claude/` the install PR previously carried none of the files setup
+  had just written, so the installation was purely local and the
+  template-drift warning stayed silent in every fresh clone, in CI and in every
+  runner worktree. Each line is need-driven: what was visible before stays
+  visible, and `!/.claude/` is root-anchored so a monorepo's `pkg-*/.claude/`
+  is not exposed. The runtime artefacts `.flowkit/` and `.claude/worktrees/`
+  are ignored by the same block. The block is rebuilt on every run, so a second
+  `/flowkit:setup` produces no duplicate lines. Existing installations are not
+  migrated — the guard takes effect the next time `/flowkit:setup` runs.
+  Three things the guard deliberately refuses to do, each pinned by a test:
+  it measures against the ignore *rules* (`--no-index`), not against the index —
+  reading the index made every already-tracked path look "not ignored", so the
+  run after the documented install commit shrank the block to `/.flowkit/`,
+  reported success (the re-check was blind for the same reason) and left
+  `git add .claude/hooks/<new>.sh` failing; it recognises the END marker by the
+  same prefix as the BEGIN marker and aborts (exit 1, file untouched) when a
+  marked block has no END marker at all — an END line one byte off, from CRLF
+  normalisation or a hand edit, used to delete everything from the BEGIN marker
+  to EOF including the target repo's own rules and still report `fixed`; and it
+  rejects a path that is not the work-tree root (exit 1) instead of silently
+  writing a monorepo's root `.gitignore` with a block that cannot help
+  `pkg-a/.claude/`. (#39)
+- `scripts/test-templates-vendor-neutral.sh`, wired into CI: keeps `templates/`
+  — copied verbatim into every target repo by `/flowkit:setup` — free of
+  cloud/SaaS provider names. (#40)
+
+### Changed
+- The merge station's post-merge proof is now three-valued: the gate return
+  changed from `postMergeGreen: boolean` to
+  `postMerge: "green" | "red" | "unmeasured"`, and run reports carry
+  `done[].postMerge` instead of `done[].postMergeRed`. Operators who parse
+  `.flowkit/runs/*.json` need to adapt. (#32)
+- The `needs-human` and budget-abort paths no longer set the PR back to draft.
+  The "do not merge" signal now travels as a label on the PR (`needs-human` /
+  `budget-exceeded`) plus an explicit, idempotent abort comment (first line
+  `<!-- flowkit-abort:v1 -->` — a repeated abort with the same reason does not
+  post twice). The PR stays ready, so the deep-review pipeline — which skips
+  drafts by design, taking its verdict with it — still produces the findings
+  the human taking over needs. The builder strips those labels when it takes
+  an existing PR over, and the merge station refuses to merge a PR that still
+  carries one (`gh pr view --json labels`); this is a prompt-level guard on the
+  cheapest model in the pipeline, not the hard server-side block the draft
+  state used to be. PRs an earlier flowkit version left as draft are healed on
+  `resume`; without it, a manual `gh pr ready <N>` is still required. (#35)
+- `/flowkit:setup` no longer silently downgrades the `claude-code-action` CI
+  pin: before overwriting an existing `.github/workflows/pr-deep-review.yml`
+  it compares the installed pin's version against the template's with
+  `sort -V` (never a lexical guess — `v1.0.9` looks newer than `v1.0.183` but
+  is not), keeps a newer installed pin, and reports which pin ended up
+  installed. (#38)
+- The shipped blocker test is provider-neutral: the Hetzner-specific
+  `HCLOUD_TOKEN` case became `MY_TOKEN`, and every keyword of the hook's secret
+  alternation (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `APIKEY`) now has its
+  own `must_block` case — previously only `TOKEN` and `API_KEY` did. A
+  completeness probe (template mode only, so it does not penalize a repo's own
+  hardening of its installed hook) derives the keyword list from the hook
+  under test and fails when a branch has no `MY_<KEYWORD>=` case, so new
+  alternation branches cannot stay untested. The installed hook's comment also
+  lost its dangling reference to a source document that never shipped with
+  flowkit. Regex behaviour is unchanged. (#40)
+- The blocker hook now also refuses interpreter escapes, the class that turns a
+  single allowlist entry into a blanket approval: `awk` reaching a shell
+  (`system(…)`, `| "sh"`, `| getline`), a pipe into `sh`/`bash`/`zsh`/`ksh`/`dash`
+  (`curl … | sh`), a download piped into `python`/`perl`/`ruby`/`node`, and an
+  absolute interpreter path that traverses out of its directory
+  (`bash /…/scripts/../../x.sh`) — the shape that would slip past the
+  `Bash(bash <plugin>/scripts/*)` prefix rule. Every rule has both a blocking
+  and a non-blocking test case, so the pipelines the runner itself uses
+  (`… | awk '{print $4}' | sort | uniq -d`, `… | tail -n 300`) keep running.
+  (#31)
+- Existing installations need one more `/flowkit:setup` run to pick up
+  0.8.0: the new `merge-blocked` label, every allowlist entry added this
+  release (plugin script paths, `gh pr edit`, `gh run rerun`,
+  `git check-ignore`, `git merge-base`, `git revert`, `tail`/`head`/`sort`/
+  `uniq` and the two literal `awk '{print $4}'` entries, quoted and unquoted)
+  and the changed hook templates only reach a repo that way — there is no
+  migration mechanism for `.claude/settings.json` beyond the merge rule setup
+  step 5 already has.
+- Allow rules for plain commands carry a word boundary (`Bash(tail *)`, not
+  `Bash(tail*)`, which also covers `tailscale …`), and `awk` is allowed only as
+  the one literal call the merge station's malformed-tree check makes. A prefix
+  rule on a program-text interpreter is not a narrow permission at all:
+  `Bash(awk *)` approves `awk 'BEGIN{system("…")}'`, and with it every command,
+  in an unattended run that reads untrusted issue and PR text. A test now fails
+  the build for either shape.
+
+### Fixed
+- Post-merge proof no longer treats a cancelled CI run as a failure (#32). The
+  merge station anchors on the PR's own merge commit
+  (`gh pr view --json mergeCommit`), waits for `status: completed` before
+  reading `conclusion`, and only `failure`/`timed_out` on that commit (or a red
+  smoke command) trigger the `onSmokeFailure` policy. Any other conclusion is
+  re-measured against the most recent completed default-branch run that
+  contains the merge commit — the usual case under
+  `concurrency: cancel-in-progress`, where the next merge kills the previous
+  post-merge run. That run also covers foreign commits, so it may only confirm
+  green: a red result there stays inconclusive instead of reverting a healthy
+  squash commit. If it stays inconclusive the unit reports
+  `postMerge: "unmeasured"`: no revert PR, no run stop, just a log line and the
+  field in the report.
+- Gate-wait no longer burns the full 45-minute window on a PR that can never
+  report a green required check: it resolves the draft state first
+  (`gh pr view --json isDraft,headRefOid`, then `gh pr ready` — the deep-review
+  pipeline skips drafts by design, so the required check comes back SKIPPED
+  instead of SUCCESS), counts the workflow runs on the PR's own head SHA when gh
+  reports "no checks reported" and re-triggers exactly once. That re-trigger is a
+  real BEHIND update — `git merge origin/<default branch>` in its own worktree,
+  pushed — because that is the only measure that actually starts a run: on the
+  two PRs of the incident, `gh pr ready` produced no Actions run at all and an
+  empty commit produced none either, while the update had the pipeline running
+  within seconds. A draft toggle and `git commit --allow-empty` are therefore
+  ruled out in the prompt, as is `gh run rerun` (there is no run to repeat). The
+  update runs outside the merge lock, which is safe because it writes to the
+  unit's feature branch, never to the default branch, and the merge station
+  re-checks BEHIND later anyway — but it follows that station's conflict rule to
+  the letter: only a pure append conflict is resolved, anything else is
+  `git merge --abort` with nothing pushed and the conflicting files in the note.
+  If the branch already contains the default branch the merge would be a no-op
+  that pushes nothing, so nothing is triggered and the finding is reported
+  instead; after a successful update the run count is measured against the new
+  head SHA. The draft *check* stays: a draft PR cannot get a green required
+  check, so establishing that still comes before any waiting. A station that does
+  not go green now returns `{ green: false, draftAtEntry, runsFound,
+  retriggered, note }` instead of throwing, the resulting `GATE:` message names
+  all three, and the needs-human comment repeats the reason verbatim instead of
+  paraphrasing it away. The same three fields are reported as `done[].gateDiag`
+  on the success path too — otherwise the most common case, a draft the station
+  quietly healed, would leave no trace in `.flowkit/runs/*.json`. (#34)
+- A builder that produced no PR — e.g. because the Bash permission classifier
+  was unavailable — is a technical error instead of a silent success, a
+  reported `pr: 0` is healed from the gh result instead of failing the unit,
+  and a claimed skip is only accepted with a merged PR on GitHub. (#31, #33)
+- A CI job that dies in its setup phase (package download, runner provisioning,
+  checkout) is no longer debugged as if it were a test failure: gate-wait first
+  diagnoses which step failed (`gh run view --json jobs`, `--log-failed`) and
+  answers a known infrastructure signature with `gh run rerun --failed` before
+  spending a fix round — one rerun per red run, at most two per station, since
+  `--failed` acts per run and one outage usually hits several workflows. The
+  rerun never counts against `maxFixRounds` and stays allowed once the fix
+  budget is exhausted; a step that fails again is reproducible and is treated as
+  a code problem. Repo-specific signatures via the new `ciInfraSignatures`
+  config field (empty strings rejected — they would match every log). Whether a
+  rerun happened is readable in the run report as `done[].gateDiag.infraRerun`
+  and is named in the `GATE:` message, so it survives the needs-human path as
+  well. (#36)
+- The progress circuit breaker no longer voids the runner's own retry, and it no
+  longer depends on how many workers are running (#31):
+  - A technical error that is requeued as transient does not count. It is not a
+    finished outcome — the runner cleans up and rebuilds the unit. Counting it
+    meant that three units each hitting one network or classifier hiccup halted
+    a run that 0.7.0 would have merged end to end, in every existing repo and
+    without any opt-in. Counted are the outcomes that are actually final:
+    `needs-human`, budget abort, externally blocked merge and the *second*
+    technical attempt of the same unit (which stops the run anyway, with the
+    concrete error instead of the breaker text).
+  - The counter is updated the moment an outcome is known, no longer after the
+    admin agent has finished. The success path reported synchronously while both
+    failure paths reported only after `await needsHumanStop(...)` /
+    `await cleanupUnit(...)`, so with `parallelism > 1` failures were sorted
+    behind successes: the same sequence of outcomes stopped a healthy run purely
+    because more workers were running. `parallelism` 3 is the shipped default.
+- "No further merges" after a red post-merge proof now also holds for units that
+  are already parked in the merge chain (#32). `stopped` only keeps *new* units
+  from starting; a unit that was waiting for the lock when the proof came back
+  red went on to merge while the revert PR was open — and since the proof waits
+  in the lock for up to ten minutes, that is exactly the window in which
+  finished units pile up. The merge station now sets and checks the halt inside
+  the lock; a parked unit ends as `needs-human` naming the unit whose post-merge
+  proof was red. Only a red post-merge halts merges — a breaker or double-fault
+  stop still lets a finished, green-verified unit merge.
+- A merge the station deliberately refuses no longer reaches the operator as
+  "the PR is green and finished, only the merge approval is missing" (#35, #37).
+  The merge prompt demanded a `GATE:` throw for an abort label on the PR and for
+  a semantic merge conflict, but `GATE_SCHEMA` (`additionalProperties: false`)
+  had no return value for it — under a forced schema the only valid way out was
+  `merged: false`, which routes into the merge diagnosis, and that station reads
+  neither labels nor mergeability. It saw an open, green, finished PR and asked
+  a human to merge by hand exactly the PR an earlier run had marked as not
+  mergeable. The station now reports `blocked: "abort-label" | "conflict"` and
+  the workflow raises the `GATE:` abort itself, before the diagnosis; a thrown
+  error remains equivalent, and `blocked: "none"` (or a missing field) leaves the
+  `merge-blocked` path untouched.
+- The two abort stations no longer risk labelling and commenting on a foreign
+  PR. Both verified their search hit with "body contains `Closes #<n>`", which
+  is true of `Closes #4123` for issue 41; both run on haiku without a schema and
+  without a JS-side re-check. They now use the same rule as the pr-check station
+  (the match must be bounded on the right by a non-digit or end of line) and, if
+  more than one verified hit remains, mutate nothing on any PR and report the
+  ambiguity on the issue instead. The builder's idempotency search uses the same
+  rule.
+- An ambiguous PR result (two verified open PRs with `Closes #<n>`) is a
+  `needs-human` instead of a technical error (#31). The pr-check station detects
+  the case deliberately, but `runUnit` could not tell it from "no PR at all": the
+  unit was requeued including a second builder run, and the identical second
+  result stopped the whole run with neither label nor comment on the issue. The
+  station now reports `ambiguous: true` (new, optional field in
+  `PRCHECK_SCHEMA`), the runner raises a `GATE:` naming the candidates, and the
+  needs-human station leaves both PRs untouched.
+- Builder and pr-check no longer prioritise MERGED and OPEN against each other
+  (#31, #33). The builder checked for a merged PR first, the station requires
+  OPEN before MERGED. When both states exist — an issue reopened after a merge
+  plus an open PR from a needs-human run — both stations behaved exactly as
+  prompted and the unit threw anyway, without a `GATE:` prefix, so it was
+  requeued and the second attempt reproduced the same constellation and stopped
+  the run. The builder prompt now carries the station's priority rule, and a
+  claimed skip against an open PR takes that PR over instead of throwing.
+- The budget check after the build no longer overtakes the `skipped` path (#31).
+  It was moved in front of the pr-check station on purpose — a builder that
+  blows its budget usually has no PR yet — but that also put it in front of an
+  already-finished issue, which then got `budget-exceeded`, lost `agent-ready`
+  and left its dependents permanently blocked for work that was long since
+  merged.
+- A CI infrastructure signature only counts in a step that runs before the
+  actual test/lint/review invocation (#36). `gh run view --log-failed` prints
+  the failed step's output in full, and `operation timed out` is also the
+  message of a legitimately failing timeout test — as a bare substring match it
+  triggered a rerun that just re-measured the same red test. The signature is
+  now evidence for such a step rather than a trigger of its own; a runner that
+  dies mid-step stays infrastructure.
+- Area serialisation counts in-flight units per area instead of holding a set of
+  areas. Two units of one area can legitimately run at once (the fallback in
+  `pickNext` allows it when nothing else is runnable); the set released the area
+  on the first completion, after which the preference pulled another unit of the
+  busy area ahead of a unit from a genuinely free one.
+- `/flowkit:setup` allowlists the plugin's own script paths
+  (`bash <pluginRoot>/scripts/*`, `python3 <pluginRoot>/scripts/*`,
+  `bash <pluginRoot>/templates/hooks/*`) plus previously missing prefixes
+  (`gh pr edit`, `gh run rerun`, `git check-ignore`, `git merge-base`,
+  `git revert`, `tail`, `head`, `awk`, `sort`, `uniq`), and the runner no
+  longer quotes those paths unnecessarily — Bash permission rules are prefix
+  patterns, so a leading quote made every such rule useless. (#31)
+
 ## [0.7.0] - 2026-07-31
 
 ### Added

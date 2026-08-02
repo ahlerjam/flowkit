@@ -108,7 +108,8 @@
         "pause-cd",
         "p0-issue"
       ],
-      "default": "revert"
+      "default": "revert",
+      "description": "Reaktion auf einen BELEGT roten Post-Merge-Lauf: abgeschlossener CI-Lauf (status completed) auf dem eigenen Merge-Commit mit conclusion failure oder timed_out bzw. roter commands.smoke. Ein abgebrochener/übersprungener Lauf (cancelled, skipped, neutral, ...) ist eine fehlende Messung, keine Rotmeldung — er wird über den jüngsten abgeschlossenen Lauf neu bestimmt, der den eigenen Merge-Commit enthält, und weil dieser auch fremde Commits testet, bestätigt er nur Grün. Diese Policy löst er nie aus."
     },
     "budgets": {
       "type": "object",
@@ -197,9 +198,21 @@
       "type": "integer",
       "default": 3
     },
+    "progressStopAfter": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Fortschritts-Circuit-Breaker: nach so vielen abgeschlossenen Einheiten IN FOLGE ohne Merge (needs-human, Budget-Abbruch, extern blockierter Merge oder zweiter technischer Fehlversuch derselben Einheit) hält der Lauf an und nennt den Grund im Bericht. Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück; blockierte Einheiten und requeuete transiente Erstfehler zählen nicht mit. 0 schaltet den Breaker ab."
+    },
     "mergeCheck": {
       "type": "string",
       "description": "Name des Pflicht-Checks vor Merge; leer = nur alle Checks grün"
+    },
+    "ciInfraSignatures": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "zusätzliche Logsignaturen, die die Gate-Wait-Station als CI-Infrastruktur (statt Code) wertet und mit `gh run rerun --failed` beantwortet, bevor eine Fix-Runde ausgelöst wird — ein Re-Run je rotem Lauf, höchstens zwei je Station. Ergänzt die eingebauten Signaturen (operation timed out, Failed to download, error sending request for url, Could not resolve host, The runner has received a shutdown signal), ersetzt sie nie. Für repo-eigene Infrastruktur gedacht (selbstgehostete Runner, interne Registry). Leere Strings sind unzulässig — sie wären Teilstring jedes Logs und würden jeden roten Check zur Infrastruktur erklären."
     },
     "overrideLabel": {
       "type": "string"
