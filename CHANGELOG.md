@@ -127,11 +127,11 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 - Existing installations need one more `/flowkit:setup` run to pick up
   0.8.0: the new `merge-blocked` label, every allowlist entry added this
   release (plugin script paths, `gh pr edit`, `gh run rerun`,
-  `git check-ignore`, `git merge-base`, `git revert`,
-  `tail`/`head`/`sort`/`uniq` and one literal `awk '{print $4}'`) and the
-  changed hook templates only reach a repo that way — there is no migration
-  mechanism for `.claude/settings.json` beyond the merge rule setup step 5
-  already has.
+  `git check-ignore`, `git merge-base`, `git revert`, `tail`/`head`/`sort`/
+  `uniq` and the two literal `awk '{print $4}'` entries, quoted and unquoted)
+  and the changed hook templates only reach a repo that way — there is no
+  migration mechanism for `.claude/settings.json` beyond the merge rule setup
+  step 5 already has.
 - Allow rules for plain commands carry a word boundary (`Bash(tail *)`, not
   `Bash(tail*)`, which also covers `tailscale …`), and `awk` is allowed only as
   the one literal call the merge station's malformed-tree check makes. A prefix

@@ -641,15 +641,21 @@ test('Learnings: learnings=false schaltet Station und Lese-Schritt ab', async ()
 // (Issue #31, löst #33)
 // ---------------------------------------------------------------------------
 
-// 10. Der Builder meldet pr:0 (klassischer Befund bei ausgefallenem
-//     Permission-Classifier) — gh kennt den PR trotzdem. Ab hier zählt nur gh:
-//     Nummer UND Branch der Folgestationen kommen aus dem Befund.
-test('pr-check: die PR-Nummer kommt von gh, ein Builder-pr:0 wird geheilt', async () => {
+// 10. Der Builder BEHAUPTET einen anderen, TRUTHY PR (klassischer Befund bei
+//     ausgefallenem Permission-Classifier wäre pr:0 — das deckt aber nur die
+//     falsy-Hälfte einer Mutation `built.pr || seen.pr` ab, siehe F-10, Review
+//     0.8.0: mit pr:0/branch:'' bleibt `0 || 581 === 581` unbemerkt gleich).
+//     Hier behauptet der Builder stattdessen PR #999 auf einem FREMDEN Branch —
+//     gh kennt nur #581. Ab hier zählt nur gh: Nummer UND Branch JEDER
+//     Folgestation (ac-verify, gate-wait, gate-merge) müssen den gh-Wert tragen,
+//     nie den truthy, aber falschen Builder-Wert (sonst mergte der Runner unter
+//     der Mutation einen fremden PR).
+test('pr-check: die PR-Nummer kommt von gh, auch wenn der Builder einen anderen (truthy) PR behauptet', async () => {
   const { report, calls } = await runWorkflow({
     units: [unit(1)],
     config: cfg(),
     respond: (c) => {
-      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: false }
+      if (c.label === 'build #1') return { pr: 999, branch: 'feat/999-fremd', skipped: false }
       if (c.label === 'pr-check #1') return { found: true, pr: 581, branch: 'feat/1-gh', state: 'OPEN' }
       return undefined
     },
@@ -659,16 +665,47 @@ test('pr-check: die PR-Nummer kommt von gh, ein Builder-pr:0 wird geheilt', asyn
   assert.ok(only(calls, 'build #1').endSeq < chk.startSeq, 'der pr-check läuft NACH dem Builder')
   assert.ok(chk.prompt.includes('gh pr list -R acme/demo --search "Closes #1" --state all'),
     'der pr-check muss gh mit --state all befragen')
-  assert.ok(!/\bpr:\s*0\b/.test(chk.prompt) && !chk.prompt.includes('581'),
+  assert.ok(!chk.prompt.includes('999') && !chk.prompt.includes('feat/999-fremd'),
     'die Behauptung des Builders darf NICHT im Prompt stehen (sonst ist Nachplappern nicht von Prüfen unterscheidbar)')
-  assert.equal(doneOf(report, 1).pr, 581, 'die PR-Nummer stammt aus dem gh-Befund, nicht aus dem Builder-Return')
+  assert.equal(doneOf(report, 1).pr, 581, 'die PR-Nummer stammt aus dem gh-Befund, nicht aus dem (truthy!) Builder-Return')
   const ac = only(calls, 'ac-verify #1')
   assert.ok(/gh pr view 581/.test(ac.prompt) && /gh pr diff 581/.test(ac.prompt),
     'der AC-Verifier muss auf den gh-verifizierten PR zeigen')
-  assert.ok(only(calls, 'gate-wait #1').prompt.includes('feat/1-gh'),
-    'der Branch der Gate-Stationen kommt aus dem gh-Befund (headRefName)')
+  const wait = only(calls, 'gate-wait #1')
+  assert.ok(wait.prompt.includes('feat/1-gh') && !wait.prompt.includes('feat/999-fremd'),
+    'der Branch der Gate-Stationen kommt aus dem gh-Befund (headRefName), nie aus dem Builder')
+  const merge = only(calls, 'gate-merge #1')
+  assert.ok(/PR #581\b/.test(merge.prompt) && !merge.prompt.includes('999'),
+    'auch die Merge-Station arbeitet mit der gh-verifizierten PR-Nummer, nicht der vom Builder behaupteten')
   none(calls, /^needs-human /)
   assert.equal(report.stopped, null)
+})
+
+// 10b. F-21 (Review 0.8.0): Test 10 prüfte bisher zusätzlich, dass die Zeichen-
+//      folge des gh-Befunds NICHT im pr-check-Prompt steht — aber dieser Befund
+//      kann strukturell nie dort stehen (er ist die ANTWORT der Station, kein
+//      Eingabewert; `prCheckPrompt(n)` hängt nur an der Issue-Nummer). Diese
+//      Assertion konnte nie rot werden. Die dokumentierte Invariante ("die
+//      Station bekommt bewusst KEINE Behauptung der Bau-Station übergeben")
+//      lässt sich nur nachweisen, indem derselbe Ablauf zweimal mit
+//      unterschiedlichen Builder-Werten läuft und die pr-check-Prompts auf
+//      Zeichengleichheit geprüft werden.
+test('pr-check-Prompt ist unabhängig vom Builder-Return (Zeichengleichheit über zwei Läufe)', async () => {
+  const runOnce = (built) => runWorkflow({
+    units: [unit(1)],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'build #1') return built
+      if (c.label === 'pr-check #1') return { found: true, pr: 581, branch: 'feat/1-gh', state: 'OPEN' }
+      return undefined
+    },
+  })
+  const a = await runOnce({ pr: 0, branch: '', skipped: false })
+  const b = await runOnce({ pr: 999, branch: 'feat/999-fremd', skipped: false, note: 'völlig andere Behauptung des Builders' })
+  const chkA = only(a.calls, 'pr-check #1')
+  const chkB = only(b.calls, 'pr-check #1')
+  assert.equal(chkA.prompt, chkB.prompt,
+    'prCheckPrompt(n) darf nicht vom Builder-Return abhängen — sonst plappert die Station dessen Behauptung nur nach, statt den Weltzustand selbst zu prüfen')
 })
 
 // 11. Kernbefund des Issues: der Builder BEHAUPTET einen PR, gh kennt keinen.
@@ -710,6 +747,35 @@ test('pr-check: "skipped" ohne gemergten PR wird nicht als Erledigung verbucht',
   assert.ok(/keinen gemergten PR/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
   none(calls, /#2\b/)
   assert.deepEqual(report.remaining, [2], '#2 darf nicht durch ein unbelegtes skipped freigegeben werden')
+})
+
+// 12b. F-11 (Review 0.8.0): der Guard `!prOk || seen.state !== 'MERGED'` hat
+//      neben "kein Treffer" (Test 12, deckt nur die !prOk-Hälfte) eine zweite
+//      Bedingung, die von keinem Test berührt wurde. gh weist hier einen
+//      VERIFIZIERTEN, aber GESCHLOSSENEN PR aus (prOk ist true, state ist
+//      CLOSED) — die skipped+OPEN-Übernahme (Test 15g) prüft einen ganz
+//      anderen Zweig (den vorgelagerten `prOk && state === 'OPEN'`-Fall) und
+//      lässt diese Bedingung unangetastet. Mutationstest: Kürzt man den Guard
+//      auf `if (!prOk)`, läuft ein geschlossener, aber verifizierter PR hier
+//      unbemerkt als `return { skipped: true, ... }` durch — die teuerste
+//      Falschmeldung, die der Produktivcode-Kommentar an dieser Stelle selbst
+//      benennt.
+test('pr-check: "skipped" bei einem geschlossenen, aber verifizierten PR ist keine Erledigung', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2, { blockedBy: [1] })],
+    config: cfg(),
+    respond: (c) => {
+      if (c.label === 'build #1') return { pr: 0, branch: '', skipped: true, note: 'sieht erledigt aus' }
+      if (c.label === 'pr-check #1') return { found: true, pr: 205, branch: 'feat/1-x', state: 'CLOSED', note: 'PR wurde geschlossen, nie gemergt' }
+      return undefined
+    },
+  })
+  assert.ok(!report.done.some((d) => d.issue === 1 && d.skipped),
+    'ein geschlossener PR ist keine Erledigung, auch wenn Nummer und Branch von gh verifiziert sind (prOk)')
+  assert.deepEqual(report.failed, [1])
+  assert.ok(/keinen gemergten PR/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  none(calls, /#2\b/)
+  assert.deepEqual(report.remaining, [2], '#2 darf nicht durch eine vermeintliche CLOSED-Erledigung freigegeben werden')
 })
 
 // 13. Belegtes skipped bei skipped=false: der Builder hat gebaut, gh sagt

@@ -390,11 +390,22 @@ Builder-Return ohne Entsprechung auf GitHub ist kein Ergebnis. Nach
 Abbruch in derselben Session: denselben Workflow mit `resumeFromRunId` starten —
 erledigte Einheiten kommen aus dem Cache. Über Session-Grenzen hinweg ist der
 Scope-Modus `resume` der Weg zurück zu liegengebliebener Arbeit.
-Beim Stop durch den Fortschritts-Circuit-Breaker sieht der Bericht bewusst
-ungewohnt aus: die auslösende Einheit steht gleichzeitig in `stopped.issue` UND
-in `remaining` — sie wurde als transienter technischer Fehler requeued, bevor der
-Breaker den Lauf anhielt. `failed` bleibt dabei leer: endgültig gescheitert ist
-sie nicht, sie kommt im nächsten Lauf unverändert wieder dran.
+Beim Stop durch den Fortschritts-Circuit-Breaker steht die auslösende Einheit
+NIE in `remaining`: gezählt wird ausschließlich ein abgeschlossener Ausgang
+(siehe „Kein Fortschritt im Lauf" oben), nie ein transienter Retry, der noch in
+der Queue wartet. Je nachdem, welcher der vier Zähler den Stop ausgelöst hat,
+findet sich `stopped.issue` deshalb in einem von zwei anderen Feldern: bei
+needs-human, Budget-Abbruch oder extern blockiertem Merge steht die Einheit —
+mit dem passenden Flag (`needsHuman`/`budgetExceeded`/`mergeBlocked`) — in
+`done`; beim zweiten, endgültigen technischen Fehlversuch steht sie in
+`failed`. `failed` bleibt beim Breaker also NICHT zwangsläufig leer, sofern
+gerade dieser vierte Zähler den Stop ausgelöst hat. In keinem der vier Fälle
+kommt die auslösende Einheit „im nächsten Lauf unverändert wieder dran": needs-
+human bleibt ohne `resume all` bewusst liegen (siehe Scope oben), Budget-
+Abbruch und merge-blocked brauchen den dort beschriebenen Label-Tausch, und der
+technische Fehler setzt kein Label — das Issue trägt weiter `agent-ready` und
+läuft im nächsten regulären Lauf als normaler Kandidat wieder an, nicht über
+einen Resume-Modus.
 Nicht jede Nicht-Erledigung hinterlässt eine Spur auf GitHub: `needs-human`,
 `budget-exceeded` und `merge-blocked` setzen Label und Kommentar an Issue und PR
 — die dritte Klasse, „Einheit hat nichts geliefert" (technischer Fehler, allen

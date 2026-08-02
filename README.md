@@ -74,6 +74,12 @@ directly — the install arrives as a pull request.
   after that many consecutive units without a merge the run halts and reports
   why, instead of burning the whole queue on a broken environment. A merge or a
   gh-verified skip resets the counter; `0` disables the breaker.
+- **Setup never silently downgrades the deep-review CI pin:** before
+  overwriting an existing `pr-deep-review.yml`, it reads the target repo's
+  currently installed `anthropics/claude-code-action` SHA pin, compares its
+  version against the template's with `sort -V` (never a lexical guess —
+  `v1.0.9` looks newer than `v1.0.183` but is not), and keeps whichever pin is
+  actually newer, reporting the outcome.
 - **Setup makes what it writes versionable:** step 7 runs a `.gitignore` guard
   that asks `git check-ignore` (never a grep over the file) whether the config,
   settings, hooks and version stamp it just wrote are ignored, frees exactly
