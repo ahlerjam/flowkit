@@ -529,6 +529,31 @@ test('Area-Präferenz: zweiter Worker weicht auf fremde Area aus', async () => {
     'Worker 2 hätte #3 (area web) vor #2 (area api, in flight) ziehen müssen')
 })
 
+// Zusatz: die Area gilt so lange als belegt, wie noch EINE Einheit daraus läuft.
+// #1 und #2 teilen sich area api (der Fallback lässt das zu, wenn nichts anderes
+// lauffähig ist); wenn #1 fertig ist, baut #2 noch. Ein Set hätte die Area schon
+// mit #1 freigegeben und danach #3 (api) vor #4 (web) gezogen — also genau die
+// Kollision erzeugt, die die Präferenz verhindern soll. #4 hängt an #1, damit es
+// beim ersten Zug noch nicht lauffähig ist und der Fallback überhaupt greift.
+test('Area-Zähler: die Area bleibt belegt, solange ein Geschwister noch läuft', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [
+      unit(1, { area: 'api' }),
+      unit(2, { area: 'api' }),
+      unit(3, { area: 'api' }),
+      unit(4, { area: 'web', blockedBy: [1] }),
+    ],
+    config: cfg({ parallelism: 2 }),
+    respond: async (c) => { if (c.label === 'build #2') await sleep(60) },
+  })
+  assert.equal(report.done.length, 4)
+  assert.deepEqual(report.blocked, [])
+  assert.ok(only(calls, 'plan #2').startSeq < only(calls, 'plan #1').endSeq,
+    'Voraussetzung: #1 und #2 (beide area api) laufen wirklich gleichzeitig')
+  assert.ok(only(calls, 'plan #4').startSeq < only(calls, 'plan #3').startSeq,
+    'nach dem Ende von #1 muss #4 (freie area web) vor #3 (area api, noch belegt durch #2) kommen')
+})
+
 // Zusatz: Learnings-Station läuft NACH dem Post-Merge-Cleanup und ist
 // best-effort — ihr Wurf darf einen gemergten, gh-verifizierten Erfolg nicht in
 // einen Fehler umdeuten (sonst würde die Einheit requeued und alles ein zweites
@@ -765,21 +790,49 @@ test('Circuit-Breaker: ein Merge setzt den Zähler zurück', async () => {
   none(calls, /#7\b/)
 })
 
-// 18. Der auslösende Vorfall: technische Fehler hängen die Einheit ans
-//     QUEUE-ENDE, die alte Doppelfehler-Regel greift bei langen Queues also erst
-//     nach einem kompletten Durchlauf. Der Breaker fängt das vorher ab.
-test('Circuit-Breaker: reihenweise technische Fehler stoppen, statt die Queue leerzubrennen', async () => {
+// 18. Der Breaker zählt ABGESCHLOSSENE Einheiten. Ein requeueter technischer
+//     Erstfehler ist keiner: derselbe Runner stuft ihn als transient ein und baut
+//     die Einheit neu. Zählte er mit, schlüge der Breaker den eigenen Retry tot —
+//     drei Einheiten, die je EINMAL an einer Netz-/Classifier-Zuckung scheitern,
+//     hielten einen Lauf an, den 0.7.0 vollständig durchgemergt hat.
+test('Circuit-Breaker: drei transiente Erstfehler halten einen gesunden Lauf nicht an', async () => {
+  const tries = {}
+  const { report, calls } = await runWorkflow({
+    units: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => unit(n)),
+    config: cfg(),
+    respond: (c) => {
+      const m = /^build #(\d+)$/.exec(c.label)
+      if (!m) return undefined
+      const n = Number(m[1])
+      tries[n] = (tries[n] || 0) + 1
+      if (n <= 3 && tries[n] === 1) throw new Error('gh: server error (transient)')
+      return undefined
+    },
+  })
+  assert.equal(report.stopped, null, 'drei einmalige technische Fehler sind kein Grund, den Lauf anzuhalten')
+  assert.equal(report.done.length, 8, 'nach dem Retry muss jede Einheit durchlaufen')
+  assert.deepEqual(report.failed, [])
+  assert.deepEqual(report.remaining, [])
+  assert.equal(doneOf(report, 1).pr, 101, 'die requeuete Einheit merged im zweiten Anlauf')
+  assert.equal(find(calls, 'build #1').length, 2, 'genau ein Retry je transientem Fehler')
+})
+
+// 18b. Gegenprobe zum Retry: eine Serie technischer Fehler brennt die Queue
+//      trotzdem nicht leer — der zweite Fehlversuch DERSELBEN Einheit stoppt den
+//      Lauf, und zwar mit dem konkreten Fehlertext statt mit dem Breaker-Text.
+test('Technische Serie: Stop am zweiten Fehlversuch derselben Einheit, nicht am Breaker', async () => {
   const { report, calls } = await runWorkflow({
     units: [unit(1), unit(2), unit(3), unit(4)],
     config: cfg(),
     respond: (c) => { if (/^build /.test(c.label)) throw new Error('Bash-Classifier nicht verfügbar') },
   })
-  assert.equal(find(calls, 'build #1').length, 1, 'kein zweiter Anlauf mehr — der Breaker greift vorher')
-  none(calls, /#4\b/)
-  assert.equal(report.stopped.issue, 3)
-  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
-  assert.deepEqual(report.failed, [], 'kein zweiter Fehler derselben Einheit — nichts ist endgültig gescheitert')
-  assert.deepEqual(report.remaining, [4, 1, 2, 3], 'die requeuten Einheiten stehen hinten in der Queue')
+  assert.equal(find(calls, 'build #1').length, 2, 'jede Einheit bekommt ihren einen Retry')
+  assert.ok(report.stopped && report.stopped.issue === 1)
+  assert.ok(/Bash-Classifier/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.ok(!/Fortschritts-Circuit-Breaker/.test(report.stopped.reason),
+    'der konkrete Fehler ist der bessere Stop-Grund als der Breaker-Text')
+  assert.deepEqual(report.failed, [1])
+  assert.deepEqual(report.remaining, [2, 3, 4], 'der Rest bleibt für den nächsten Lauf in der Queue')
 })
 
 // 19. Fehlkonfiguration darf den Breaker nicht STILL abschalten (ein String wie
@@ -811,6 +864,104 @@ test('progressStopAfter: 0 schaltet den Breaker ab (Paarprobe gegen Default 3)',
   assert.ok(on.report.stopped && /Fortschritts-Circuit-Breaker/.test(on.report.stopped.reason),
     'derselbe Ablauf MUSS mit dem Default 3 stoppen — sonst beweist der 0-Fall nichts')
   assert.deepEqual(on.report.remaining, [4])
+})
+
+// 20b. Der Zähler muss zum Zeitpunkt des feststehenden Ausgangs laufen, nicht
+//      nach der GitHub-Nachbereitung. Der Erfolgspfad meldet synchron, die
+//      Misserfolgspfade lagen hinter `await needsHumanStop(...)` — bei
+//      parallelism > 1 sortierte das Misserfolge HINTER Erfolge. Hier ist die
+//      echte Ausgangsfolge F(#1), F(#2), S(#3), F(#4): der Merge dazwischen setzt
+//      den Zähler zurück, der Lauf ist gesund. Mit aufgeschobenem Increment
+//      kommt beim Breaker S, F, F, F an — und er hält denselben Lauf an.
+//      Die Verzögerungen sind Wanduhr, nicht Aufrufreihenfolge: nur so ist die
+//      Reihenfolge der Ausgänge unabhängig von der Zahl der Stationen je Pfad.
+test('Circuit-Breaker: Misserfolge zählen sofort, nicht erst nach dem Admin-Agenten', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg({ parallelism: 4 }),
+    respond: async (c) => {
+      if (/^build #[12]$/.test(c.label)) await sleep(10)
+      if (c.label === 'build #3') await sleep(40)
+      if (c.label === 'build #4') await sleep(90)
+      // Der Admin-Agent der beiden ersten Misserfolge ist langsam — genau das
+      // Fenster, in dem der aufgeschobene Increment hinter #3 und #4 rutscht.
+      if (/^needs-human #[12]$/.test(c.label)) await sleep(120)
+      if (/^ac-verify(\+\d+)? #(1|2|4)$/.test(c.label)) return { pass: false, unmet: ['AC offen'] }
+      return undefined
+    },
+  })
+  assert.equal(report.done.length, 4, 'alle vier Einheiten laufen bei parallelism 4 gleichzeitig an')
+  assert.equal(doneOf(report, 3).pr, 103, 'der Merge liegt zwischen dem zweiten und dem dritten Misserfolg')
+  assert.equal(report.stopped, null,
+    'zwei Misserfolge, ein Merge, ein Misserfolg: der Merge setzt zurück — dieser Lauf darf nicht anhalten')
+})
+
+// 20c. Der Budget-Arm des Breakers: ein Budget-Abbruch verbrennt Tokens, ohne zu
+//      mergen. Ohne diesen Test bleibt `!res.budgetExceeded &&` ungeprüft — der
+//      Lauf brennt dann bei falsch kalibrierten Budgets die ganze Queue leer.
+test('Circuit-Breaker: drei Budget-Abbrüche in Folge halten den Lauf an', async () => {
+  const state = { tokens: 0 }
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg({ budgets: { S: { turns: 20, tokens: 1000 }, M: { turns: 40, tokens: 1000 }, L: { turns: 60, tokens: 1000 } } }),
+    budget: { spent: () => state.tokens },
+    respond: (c) => { if (/^build #[123]$/.test(c.label)) state.tokens += 5000 },
+  })
+  assert.equal(report.tokenMode, 'delta')
+  assert.equal(find(calls, 'budget-abort #3').length, 1)
+  assert.ok(report.stopped, 'drei gesprengte Budgets in Folge heißen: die Budgets sind falsch kalibriert')
+  assert.equal(report.stopped.issue, 3)
+  assert.ok(/Fortschritts-Circuit-Breaker/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.ok(/Budget-Abbruch ohne Merge/.test(report.stopped.reason),
+    'der Stop-Grund muss den auslösenden Zustand benennen, nicht nur die Zahl')
+  assert.deepEqual(report.remaining, [4])
+  none(calls, /#4\b/)
+})
+
+// 20d. Gegenstück: eine gh-BELEGTE Alt-Erledigung ist Fortschritt. Ein
+//      Resume-Lauf, dessen erste Einheiten längst gemergt sind, darf nicht am
+//      Breaker sterben — sonst kommt niemand mehr an die restliche Queue.
+test('Circuit-Breaker: gh-belegte Alt-Erledigungen zählen als Fortschritt', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg(),
+    respond: (c) => {
+      const m = /^(build|pr-check) #(\d+)$/.exec(c.label)
+      if (!m || Number(m[2]) > 3) return undefined
+      return m[1] === 'build'
+        ? { pr: 0, branch: '', skipped: true, note: 'war schon erledigt' }
+        : { found: true, pr: 700 + Number(m[2]), branch: `feat/${m[2]}-x`, state: 'MERGED' }
+    },
+  })
+  assert.equal(report.stopped, null, 'drei belegte Erledigungen sind Fortschritt, kein Stillstand')
+  assert.equal(report.done.length, 4)
+  assert.equal(doneOf(report, 3).skipped, true)
+  assert.equal(doneOf(report, 4).pr, 104, 'die vierte Einheit muss noch anlaufen und mergen')
+})
+
+// 20e. Der !stopped-Guard: ein schon gesetzter Stop-Grund gewinnt. Ohne ihn
+//      überschreibt der Breaker bei parallelism 3–4 den Post-Merge-rot-Grund —
+//      /flowkit:status rendert nur stopped.reason, der Revert-Hinweis
+//      verschwände aus dem Tagesüberblick.
+test('Circuit-Breaker: der Post-Merge-rot-Grund gewinnt gegen den Breaker-Text', async () => {
+  const { report } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3), unit(4)],
+    config: cfg({ parallelism: 4, maxFixRounds: 1, onSmokeFailure: 'revert' }),
+    respond: async (c) => {
+      if (c.label === 'gate-merge #1') return { merged: true, postMerge: 'red', note: 'run 42 conclusion failure' }
+      // Die drei Misserfolge fallen NACH dem roten Post-Merge an (Wanduhr), sonst
+      // stünde der Breaker-Grund zu Recht dort.
+      if (/^ac-verify(\+\d+)? #(2|3|4)$/.test(c.label)) { await sleep(30); return { pass: false, unmet: ['AC offen'] } }
+      return undefined
+    },
+  })
+  assert.equal(report.done.filter((d) => d.needsHuman).length, 3,
+    'ohne drei tatsächliche Misserfolge wäre der Test vakuum-grün')
+  assert.ok(report.stopped)
+  assert.equal(report.stopped.issue, 1)
+  assert.ok(/Post-Merge rot/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped.reason}`)
+  assert.ok(!/Fortschritts-Circuit-Breaker/.test(report.stopped.reason),
+    'der Breaker darf einen bereits gesetzten Stop-Grund nicht überschreiben')
 })
 
 // ---------------------------------------------------------------------------
@@ -882,6 +1033,38 @@ test('Post-Merge red: Policy-Stop bleibt erhalten, keine weiteren Merges', async
   assert.ok(/p0-issue/.test(report.stopped.reason), 'der Policy-Name aus der CONFIG gehört in den Stop-Grund')
   assert.equal(doneOf(report, 1).postMerge, 'red')
   none(calls, /^gate-merge #2/)
+})
+
+// 23b. Dieselbe Zusage bei parallelism > 1, wo sie erst etwas kostet: #2 hängt
+//      beim roten Befund von #1 schon IN der Merge-Kette. `stopped` bremst nur
+//      den Start neuer Einheiten — die geparkte Einheit mergte weiter, während
+//      der Revert-PR offenstand. Der Post-Merge-Beweis wartet bis zu zehn
+//      Minuten im Lock; genau dort laufen die fertigen Einheiten auf.
+test('Post-Merge red: die in der Merge-Kette geparkte Einheit merged nicht mehr', async () => {
+  const { report, calls } = await runWorkflow({
+    units: [unit(1), unit(2), unit(3)],
+    config: cfg({ parallelism: 2 }),
+    respond: async (c) => {
+      if (c.label === 'gate-merge #1') {
+        // Der Beweis läuft IM Lock — in dieser Zeit reiht sich #2 ein.
+        await sleep(30)
+        return { merged: true, postMerge: 'red', note: 'run 42 conclusion failure' }
+      }
+      return undefined
+    },
+  })
+  assert.equal(calls.filter((c) => /^gate-merge /.test(c.label)).length, 1,
+    'genau ein Merge — und zwar der von #1')
+  only(calls, 'gate-merge #1')
+  none(calls, /^gate-merge #2/)
+  none(calls, /^merge-diag #2/)
+  assert.equal(doneOf(report, 1).postMerge, 'red')
+  const d2 = doneOf(report, 2)
+  assert.equal(d2.needsHuman, true, 'die geparkte Einheit endet als needs-human, nicht als Merge')
+  assert.ok(/Merge nicht ausgeführt/.test(d2.note), `note war: ${d2.note}`)
+  assert.ok(/Post-Merge-Beweis für #1/.test(d2.note), 'der Grund muss die auslösende Einheit benennen')
+  assert.ok(report.stopped && /Post-Merge rot/.test(report.stopped.reason), `Stop-Grund war: ${report.stopped && report.stopped.reason}`)
+  assert.deepEqual(report.remaining, [3], 'nach dem Stop startet keine weitere Einheit')
 })
 
 // 24. Ein unbekannter Wert (Schema-Ausrutscher der Engine) fällt in die NICHT

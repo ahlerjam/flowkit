@@ -202,7 +202,7 @@
       "type": "integer",
       "minimum": 0,
       "default": 3,
-      "description": "Fortschritts-Circuit-Breaker: nach so vielen abgeschlossenen Einheiten IN FOLGE ohne Merge (needs-human, Budget-Abbruch, extern blockierter Merge oder technischer Fehler) hält der Lauf an und nennt den Grund im Bericht. Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück; blockierte Einheiten zählen nicht mit. 0 schaltet den Breaker ab."
+      "description": "Fortschritts-Circuit-Breaker: nach so vielen abgeschlossenen Einheiten IN FOLGE ohne Merge (needs-human, Budget-Abbruch, extern blockierter Merge oder zweiter technischer Fehlversuch derselben Einheit) hält der Lauf an und nennt den Grund im Bericht. Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück; blockierte Einheiten und requeuete transiente Erstfehler zählen nicht mit. 0 schaltet den Breaker ab."
     },
     "mergeCheck": {
       "type": "string",

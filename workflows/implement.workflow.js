@@ -586,7 +586,22 @@ const runUnit = async (u) => {
   // fixRounds wäre hier systematisch zu niedrig.
   if (gateDiag.infraRerun) LOG(`#${n} Gate-Wait: CI-Infrastruktur-Re-Run (gh run rerun --failed) war nötig — er zählt NICHT auf maxFixRounds.`)
   if (!wait || wait.green !== true) throw new Error(`GATE: Checks nicht grün: ${(wait && wait.note) || 'kein Ergebnis'} ${gateDiagText(gateDiag)}`)
-  const gate = await withMergeLock(() => agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA }))
+  // "Keine weiteren Merges" (Spec §7.5) gilt auch für Einheiten, die beim roten
+  // Post-Merge-Beweis schon in der Merge-Kette hingen: `stopped` bremst nur den
+  // Start NEUER Einheiten (while (!stopped) im worker), die geparkten mergten
+  // fröhlich weiter, während der Revert-PR offenstand. Der Beweis wartet bis zu
+  // zehn Minuten IM Lock — genau das Fenster, in dem bei parallelism > 1 die
+  // fertigen Einheiten auflaufen. Prüfen UND setzen passieren deshalb INNERHALB
+  // der Kette: der Worker notiert den Stop-Grund erst nach Cleanup und
+  // Learnings, da läuft der nächste Merge längst. Nur der rote Post-Merge hält
+  // Merges an — ein Breaker- oder Doppelfehler-Stop darf eine fertige, grün
+  // geprüfte Einheit sehr wohl noch zu Ende mergen.
+  const gate = await withMergeLock(async () => {
+    if (mergeHalt) throw new Error(`GATE: Merge nicht ausgeführt — ${mergeHalt}`)
+    const g = await agent(gateMergePrompt(n, pr, prBranch, u), { label: `gate-merge #${n}`, phase: 'Implement', model: 'haiku', schema: GATE_SCHEMA })
+    if (g && g.postMerge === 'red') mergeHalt = `der Lauf ist angehalten, weil der Post-Merge-Beweis für #${n} (PR #${pr}) rot war${g.note ? `: ${g.note}` : ''}`
+    return g
+  })
   let mergeNote = (gate && gate.note) || ''
   let mergePost = gate ? gate.postMerge : 'unmeasured'
   let postMergeUnverified = false
@@ -661,6 +676,9 @@ const runUnit = async (u) => {
 }
 
 let mergeChain = Promise.resolve()
+// Gesetzt von der Merge-Station selbst, noch im Lock (siehe runUnit): ab dem
+// ersten belegt roten Post-Merge-Lauf darf keine geparkte Einheit mehr mergen.
+let mergeHalt = null
 const withMergeLock = (fn) => {
   const run = mergeChain.then(fn, fn)
   mergeChain = run.then(() => {}, () => {})
@@ -674,7 +692,21 @@ const failed = []
 const blocked = []
 const deferredByBudget = []
 let stopped = null
-const inFlightAreas = new Set()
+// Zähler statt Set: bei parallelism > 1 laufen zwei Einheiten derselben Area
+// durchaus gleichzeitig — der Fallback in pickNext lässt das bewusst zu, weil
+// die Area-Serialisierung eine Optimierung ist und keine Korrektheitsregel. Ein
+// Set gab die Area schon nach der ERSTEN Fertigmeldung frei, obwohl Geschwister
+// noch bauten; die Präferenz zog danach eine gleich-Area-Einheit vor eine
+// Einheit einer wirklich freien Area — also genau die Kollision, die sie
+// verhindern soll.
+const inFlightAreas = new Map()
+const areaEnter = (a) => { if (a) inFlightAreas.set(a, (inFlightAreas.get(a) || 0) + 1) }
+const areaLeave = (a) => {
+  if (!a) return
+  const rest = (inFlightAreas.get(a) || 0) - 1
+  if (rest > 0) inFlightAreas.set(a, rest)
+  else inFlightAreas.delete(a)
+}
 const inFlightIssues = new Set()
 const inRun = new Set(units.map((u) => u.n))
 // doneOk = in DIESEM Lauf sauber erledigt (merged oder bereits erledigt) — nur das
@@ -762,16 +794,20 @@ const needsHumanStop = async (u, reason) => {
 }
 
 // Fortschritts-Circuit-Breaker (Issue #31): der auslösende Lauf startete 23
-// Einheiten und erzeugte keinen einzigen PR. Jede Einheit scheiterte für sich
-// (needs-human bzw. erster technischer Fehler), keine Regel griff über Einheiten
-// HINWEG — und weil ein technischer Fehler die Einheit ans QUEUE-ENDE hängt
-// (queue.push), käme der zweite Versuch derselben Einheit erst nach allen
-// anderen. Deshalb ein laufweiter Zähler: nur ein Merge oder eine gh-verifizierte
-// Erledigung setzt ihn zurück. Blockierte Einheiten zählen nicht — sie laufen nie
-// an und kosten nichts. Der !stopped-Guard lässt einen bereits gesetzten
-// Stop-Grund (Post-Merge rot, zweiter technischer Fehler) gewinnen; Lesen und
-// Schreiben von noProgress passieren synchron ohne dazwischenliegendes await,
-// damit ist der Zähler auch bei parallelen Workern konsistent.
+// Einheiten und erzeugte keinen einzigen PR. Jede Einheit scheiterte für sich,
+// keine Regel griff über Einheiten HINWEG. Deshalb ein laufweiter Zähler: nur ein
+// Merge oder eine gh-verifizierte Erledigung setzt ihn zurück.
+// Gezählt wird ausschließlich der ENDGÜLTIGE Ausgang einer Einheit — needs-human,
+// Budget-Abbruch, extern blockierter Merge, zweiter technischer Fehlversuch. Eine
+// Einheit, die nach einem transienten technischen Fehler wieder in der Queue
+// steht, hat noch gar keinen Ausgang und zählt nicht; sonst schlüge der Breaker
+// den Retry tot, den derselbe Runner zwei Zeilen vorher anordnet.
+// Blockierte Einheiten zählen ebenfalls nicht — sie laufen nie an und kosten
+// nichts. Der !stopped-Guard lässt einen bereits gesetzten Stop-Grund (Post-Merge
+// rot, zweiter technischer Fehler) gewinnen; Lesen und Schreiben von noProgress
+// passieren synchron ohne dazwischenliegendes await, und jeder Aufrufer meldet,
+// sobald der Ausgang feststeht — nicht erst nach dem Admin-Agenten. Sonst hinge
+// die Zählreihenfolge bei parallelism > 1 an der Laufzeit der Aufräum-Stationen.
 let noProgress = 0
 const noteOutcome = (progressed, u, why) => {
   if (progressed) { noProgress = 0; return }
@@ -793,7 +829,7 @@ const worker = async () => {
     const u = pickNext()
     if (u === WAIT) { await waitProgress(); continue }
     if (!u) return
-    if (u.area) inFlightAreas.add(u.area)
+    areaEnter(u.area)
     const start = TOKEN_MODE === 'delta' ? budget.spent() : 0
     try {
       const res = await runUnit(u)
@@ -830,6 +866,15 @@ const worker = async () => {
       // GESAMTEN Lauf crashen (kein Report, restliche Einheiten laufen nie) —
       // die Buchführung (unresolved/done/failed) muss auch dann stimmen.
       if (msg.startsWith('GATE:')) {
+        // needs-human bleibt ein Einheit-Stopp, der den Lauf einzeln nie anhält —
+        // aber eine SERIE davon ist genau das Muster, das der Breaker abfängt.
+        // Gezählt wird, sobald der Ausgang FESTSTEHT, nicht nach der
+        // GitHub-Nachbereitung: lag der Increment hinter `await
+        // needsHumanStop(...)`, sortierten sich Misserfolge bei parallelism > 1
+        // hinter Erfolge (der Erfolgspfad meldet synchron), und derselbe
+        // Ausgangsverlauf hielt einen gesunden Lauf an — nur weil mehr Worker
+        // liefen. parallelism 3 ist der ausgelieferte Default.
+        noteOutcome(false, u, msg)
         try {
           await needsHumanStop(u, msg)
         } catch (e2) {
@@ -838,9 +883,6 @@ const worker = async () => {
         unresolved.add(u.n)
         done.push({ issue: u.n, needsHuman: true, tokens: TOKEN_MODE === 'delta' ? budget.spent() - start : null, size: u.size, note: msg })
         LOG(`#${u.n} -> needs-human (Lauf fährt fort): ${msg}`)
-        // needs-human bleibt ein Einheit-Stopp, der den Lauf einzeln nie anhält —
-        // aber eine SERIE davon ist genau das Muster, das der Breaker abfängt.
-        noteOutcome(false, u, msg)
       } else {
         failures[u.n] = (failures[u.n] || 0) + 1
         LOG(`#${u.n} technischer Fehler (Versuch ${failures[u.n]}): ${msg}`)
@@ -854,16 +896,25 @@ const worker = async () => {
           failed.push(u.n)
           unresolved.add(u.n)
           LOG(`STOP an #${u.n}: zweiter technischer Fehler. Operator entscheidet.`)
+          // Nur der ENDGÜLTIGE Fehlschlag ist eine abgeschlossene Einheit ohne
+          // Merge. Der erste technische Fehler ist per Definition dieses Runners
+          // transient — er räumt auf und baut die Einheit neu. Zählte der Breaker
+          // ihn mit, entwertete er den eigenen Retry: drei Einheiten, die je
+          // EINMAL an einer Netz-/Classifier-Zuckung scheitern, hielten einen
+          // Lauf an, den 0.7.0 vollständig durchgemergt hätte — ohne Opt-in, in
+          // jedem Bestandsrepo. Der Schutz gegen den auslösenden Vorfall bleibt:
+          // needs-human, Budget-Abbruch und merge-blocked sind abgeschlossene
+          // Ausgänge und zählen sofort, und die Serie technischer Fehler endet
+          // spätestens hier am zweiten Fehlversuch derselben Einheit.
+          // Nach dem Stop-Block: der !stopped-Guard lässt den konkreten Grund
+          // (zweiter Fehler dieser Einheit) gegen den Breaker-Text gewinnen.
+          noteOutcome(false, u, msg)
         } else {
           queue.push(u)
         }
-        // NACH dem Requeue/Stop-Block: die bestehende Buchführung bleibt
-        // unverändert, und der !stopped-Guard lässt einen schon gesetzten
-        // Stop-Grund (zweiter Fehler derselben Einheit) gewinnen.
-        noteOutcome(false, u, msg)
       }
     } finally {
-      if (u.area) inFlightAreas.delete(u.area)
+      areaLeave(u.area)
       inFlightIssues.delete(u.n)
       notifyProgress()
     }

@@ -17,9 +17,10 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   Ambiguous matches, a closed PR and an empty branch name are all treated as
   "no usable result". (#31, #33)
 - Progress circuit breaker: a run now stops after `progressStopAfter`
-  consecutive units without a merge (needs-human, budget abort or technical
-  error); a merge or a gh-verified skip resets the counter, blocked units do
-  not count. Default 3, `0` disables it. (#31)
+  consecutive units that finished without a merge (needs-human, budget abort,
+  externally blocked merge, or the second technical attempt of the same unit); a
+  merge or a gh-verified skip resets the counter, blocked units and requeued
+  transient first failures do not count. Default 3, `0` disables it. (#31)
 - Merge diagnosis station and the new `merge-blocked` state: when the merge
   station returns nothing (the harness can stop an unattended merge) or reports
   `merged != true`, a read-only station reads the real PR state — `state`,
@@ -182,6 +183,36 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   rerun happened is readable in the run report as `done[].gateDiag.infraRerun`
   and is named in the `GATE:` message, so it survives the needs-human path as
   well. (#36)
+- The progress circuit breaker no longer voids the runner's own retry, and it no
+  longer depends on how many workers are running (#31):
+  - A technical error that is requeued as transient does not count. It is not a
+    finished outcome — the runner cleans up and rebuilds the unit. Counting it
+    meant that three units each hitting one network or classifier hiccup halted
+    a run that 0.7.0 would have merged end to end, in every existing repo and
+    without any opt-in. Counted are the outcomes that are actually final:
+    `needs-human`, budget abort, externally blocked merge and the *second*
+    technical attempt of the same unit (which stops the run anyway, with the
+    concrete error instead of the breaker text).
+  - The counter is updated the moment an outcome is known, no longer after the
+    admin agent has finished. The success path reported synchronously while both
+    failure paths reported only after `await needsHumanStop(...)` /
+    `await cleanupUnit(...)`, so with `parallelism > 1` failures were sorted
+    behind successes: the same sequence of outcomes stopped a healthy run purely
+    because more workers were running. `parallelism` 3 is the shipped default.
+- "No further merges" after a red post-merge proof now also holds for units that
+  are already parked in the merge chain (#32). `stopped` only keeps *new* units
+  from starting; a unit that was waiting for the lock when the proof came back
+  red went on to merge while the revert PR was open — and since the proof waits
+  in the lock for up to ten minutes, that is exactly the window in which
+  finished units pile up. The merge station now sets and checks the halt inside
+  the lock; a parked unit ends as `needs-human` naming the unit whose post-merge
+  proof was red. Only a red post-merge halts merges — a breaker or double-fault
+  stop still lets a finished, green-verified unit merge.
+- Area serialisation counts in-flight units per area instead of holding a set of
+  areas. Two units of one area can legitimately run at once (the fallback in
+  `pickNext` allows it when nothing else is runnable); the set released the area
+  on the first completion, after which the preference pulled another unit of the
+  busy area ahead of a unit from a genuinely free one.
 - `/flowkit:setup` allowlists the plugin's own script paths
   (`bash <pluginRoot>/scripts/*`, `python3 <pluginRoot>/scripts/*`,
   `bash <pluginRoot>/templates/hooks/*`) plus previously missing prefixes

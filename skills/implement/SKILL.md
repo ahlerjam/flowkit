@@ -300,17 +300,20 @@ statt still ewig zu blockieren.
 - **Technischer Fehler** (Crash, Infra, gh-Ausfall, ODER: nach dem Builder ist
   auf GitHub kein verwertbarer PR zum Issue nachweisbar — siehe Station 3):
   erster Fehler → Cleanup + Queue-Ende (transient); zweiter technischer Fehler
-  derselben Einheit → Lauf stoppt mit Bericht. Weil das Requeue ans Queue-ENDE
-  geht, greift diese Regel bei langen Queues erst spät — dafür gibt es den
-  Fortschritts-Circuit-Breaker.
+  derselben Einheit → Lauf stoppt mit Bericht, und zwar mit dem konkreten
+  Fehlertext als `stopped.reason`.
 - **Kein Fortschritt im Lauf** (`CONFIG.progressStopAfter`, Default 3): enden so
   viele abgeschlossene Einheiten IN FOLGE ohne Merge — `needs-human`,
-  Budget-Abbruch oder technischer Fehler —, hält der Lauf an und nennt den Grund
-  im Bericht (`stopped.reason` beginnt mit „Fortschritts-Circuit-Breaker").
+  Budget-Abbruch, extern blockierter Merge oder der ZWEITE technische Fehlversuch
+  derselben Einheit —, hält der Lauf an und nennt den Grund im Bericht
+  (`stopped.reason` beginnt mit „Fortschritts-Circuit-Breaker").
   Ein Merge oder eine gh-verifizierte Erledigung setzt den Zähler zurück;
-  dauerhaft blockierte Einheiten zählen nicht mit (sie laufen nie an). `0`
-  schaltet den Breaker ab. Grund: ein Lauf, der 23 Einheiten ohne einen
-  einzigen PR durchreicht, soll nicht bis zum Ende brennen (Issue #31).
+  dauerhaft blockierte Einheiten zählen nicht mit (sie laufen nie an), und eine
+  Einheit, die nach einem transienten technischen Fehler wieder in der Queue
+  steht, ebenfalls nicht — sie hat noch gar keinen Ausgang, und der Breaker soll
+  den Retry nicht totschlagen, den der Runner selbst anordnet. `0` schaltet den
+  Breaker ab. Grund: ein Lauf, der 23 Einheiten ohne einen einzigen PR
+  durchreicht, soll nicht bis zum Ende brennen (Issue #31).
 - **Post-Merge rot** (`done[].postMerge == "red"`: abgeschlossener CI-Lauf auf
   dem eigenen Merge-Commit mit `conclusion` `failure`/`timed_out` oder roter
   Smoke): onSmokeFailure-Policy läuft, der LAUF stoppt — keine weiteren Merges
