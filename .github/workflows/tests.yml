@@ -44,12 +44,12 @@ jobs:
       - name: gitignore-guard
         run: bash scripts/test-gitignore-guard.sh
 
-      # Der Offline-Test oben (Sektion (e)) vergleicht das Template gegen eine
-      # Konstante. Hier wird die Konstante gegen die Wirklichkeit geprüft:
-      # zeigt der Versionskommentar wirklich auf diesen Commit? Blockiert NUR
-      # bei echtem Mismatch; API-/Netzprobleme geben eine Warnung. Die
-      # Staleness-Meldung ist bewusst nicht blockierend — sonst würde das
-      # nächste Upstream-Release jeden unbeteiligten PR rot färben.
+      # The offline test above (section (e)) compares the template against a
+      # constant. This step checks that constant against reality: does the
+      # version comment really name this commit? Blocks ONLY on a genuine
+      # mismatch; network/API trouble downgrades to a warning. The staleness
+      # notice is deliberately non-blocking too — otherwise the next upstream
+      # release would turn every unrelated PR red.
       - name: claude-code-action pin resolves to its version comment
         env:
           GH_TOKEN: ${{ github.token }}

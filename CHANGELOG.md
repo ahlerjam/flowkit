@@ -8,7 +8,7 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-08-01
+## [0.8.0] - 2026-08-02
 
 ### Added
 - `pr-check` station: right after the builder the runner asks GitHub itself
