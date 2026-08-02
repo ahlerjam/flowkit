@@ -47,7 +47,7 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   apart or a half-finished bump now fail the build instead of going unnoticed
   for 46 patch releases, which is what happened before this fix. (#38)
 - `.gitignore` guard: `/flowkit:setup` step 7 now runs
-  `scripts/gitignore-guard.sh`, which asks `git check-ignore` whether
+  `scripts/gitignore-guard.sh`, which asks `git check-ignore --no-index` whether
   `.claude/flowkit-version`, `.claude/settings.json`,
   `.claude/workflow.config.json` and `.claude/hooks/*.sh` are ignored, writes
   the required negations as one marker-delimited, root-anchored block
@@ -61,7 +61,20 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   is not exposed. The runtime artefacts `.flowkit/` and `.claude/worktrees/`
   are ignored by the same block. The block is rebuilt on every run, so a second
   `/flowkit:setup` produces no duplicate lines. Existing installations are not
-  migrated — the guard takes effect the next time `/flowkit:setup` runs. (#39)
+  migrated — the guard takes effect the next time `/flowkit:setup` runs.
+  Three things the guard deliberately refuses to do, each pinned by a test:
+  it measures against the ignore *rules* (`--no-index`), not against the index —
+  reading the index made every already-tracked path look "not ignored", so the
+  run after the documented install commit shrank the block to `/.flowkit/`,
+  reported success (the re-check was blind for the same reason) and left
+  `git add .claude/hooks/<new>.sh` failing; it recognises the END marker by the
+  same prefix as the BEGIN marker and aborts (exit 1, file untouched) when a
+  marked block has no END marker at all — an END line one byte off, from CRLF
+  normalisation or a hand edit, used to delete everything from the BEGIN marker
+  to EOF including the target repo's own rules and still report `fixed`; and it
+  rejects a path that is not the work-tree root (exit 1) instead of silently
+  writing a monorepo's root `.gitignore` with a block that cannot help
+  `pkg-a/.claude/`. (#39)
 - `scripts/test-templates-vendor-neutral.sh`, wired into CI: keeps `templates/`
   — copied verbatim into every target repo by `/flowkit:setup` — free of
   cloud/SaaS provider names. (#40)

@@ -225,8 +225,11 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    Schritt 5 erzeugten Dateien frei, falls ein Ignore-Muster greift:
    `.claude/flowkit-version`, `.claude/settings.json`,
    `.claude/workflow.config.json`, `.claude/hooks/*.sh`. Jede Zeile hängt an
-   einer eigenen Bedarfsprüfung (`git check-ignore`) — was vorher sichtbar war,
-   bleibt sichtbar. Es schreibt genau EINEN markierten Block
+   einer eigenen Bedarfsprüfung (`git check-ignore --no-index`, also gegen die
+   Ignore-REGELN, nicht gegen den Index) — was vorher sichtbar war, bleibt
+   sichtbar. Aufruf ZWINGEND aus der Repo-Wurzel: der Block ist root-verankert,
+   ein Unterverzeichnis lehnt der Guard ab, statt die Root-.gitignore eines
+   Monorepos zu beschreiben. Es schreibt genau EINEN markierten Block
    (`# >>> flowkit` … `# <<< flowkit`) und baut ihn bei jedem Lauf neu; ein
    zweites `/flowkit:setup` erzeugt keine doppelten Zeilen. Die .gitignore
    darüber hinaus NICHT von Hand ändern und keine Negation selbst anhängen:
@@ -241,8 +244,13 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
      Abschlussbericht: „Drift-Warnung inaktiv: <pfade> lassen sich in diesem
      Repo nicht versionieren — die Templates-veraltet-Meldung des
      SessionStart-Hooks löst in frischen Clones nie aus."
-   - Exit 1 (kein Git-Work-Tree bzw. .gitignore nicht schreibbar) → ebenfalls in
-     den Bericht; Setup läuft weiter.
+   - Exit 1 (kein Git-Work-Tree, übergebener Pfad ist nicht die Repo-Wurzel,
+     markierter Block ohne `# <<< flowkit`-Marke, oder .gitignore nicht
+     schreibbar — die .gitignore bleibt in allen vier Fällen unverändert) →
+     ebenfalls in den Bericht; Setup läuft weiter. Bei „ohne END-Marke" die
+     .gitignore von Hand richten (END-Marke wiederherstellen oder den ganzen
+     Block entfernen) und den Guard erneut laufen lassen — er darf nicht raten,
+     wo der Block endet, sonst löscht er die eigenen Regeln des Zielrepos mit.
 8. **Abschlussbericht:** was angelegt/geändert/übersprungen wurde, als Chat-Ausgabe;
    bei installiertem CI-Gate ZWINGEND eine Zeile zum `claude-code-action`-Pin —
    welche Version jetzt in `.github/workflows/pr-deep-review.yml` steht,

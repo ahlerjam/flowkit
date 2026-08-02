@@ -7,7 +7,9 @@
 #   gitignore-guard.sh [<pfad-im-repo>]        (Default: .)
 # Exit:
 #   0  alles versionierbar (mit oder ohne Ergänzung)
-#   1  kein Git-Work-Tree bzw. .gitignore nicht schreibbar
+#   1  Voraussetzung verletzt: kein Git-Work-Tree, übergebener Pfad ist nicht die
+#      Wurzel des Work-Trees, markierter Block ohne END-Marke, oder .gitignore
+#      nicht schreibbar. In allen vier Fällen bleibt die .gitignore unverändert.
 #   3  mindestens ein Pfad bleibt trotz Ergänzung ignoriert
 #
 # Warum ein Script und keine Prosa in commands/setup.md: die Reihenfolge der
@@ -23,9 +25,14 @@
 #     dreht die Prüfung damit still um; `-q` antwortet korrekt, und beide
 #     zusammen sind ein fatal error (rc=128). Hier wird ausschließlich `-q`
 #     benutzt.
-# Bereits GETRACKTE Pfade meldet `git check-ignore` als nicht ignoriert (es
-# liest den Index mit). Das ist die gewollte Wirkung: was schon im Repo liegt,
-# braucht keine Freistellung.
+# Gemessen wird mit `--no-index`, also ausschließlich gegen die Ignore-REGELN.
+# Ohne das liest `git check-ignore` den Index mit und meldet jeden bereits
+# GETRACKTEN Pfad als „nicht ignoriert" — der Guard kehrt sich damit beim
+# zweiten Lauf gegen sich selbst um: nach dem in commands/setup.md Schritt 8
+# vorgeschriebenen `git add` + Commit misst er `free_files=0`, schrumpft den
+# Block auf `/.flowkit/`, und die Nachprüfung ist aus demselben Grund blind und
+# meldet Erfolg. Genau dieser zweite Lauf ist der dokumentierte Update-Pfad;
+# danach scheitert `git add .claude/hooks/<neuer-hook>.sh` mit rc=1.
 #
 # `set -u` ohne `set -e` — wie in den Hook-Skripten: die Bedarfsprüfungen leben
 # davon, dass ein Nicht-Treffer (Exit 1) ein normales Ergebnis ist.
@@ -48,9 +55,23 @@ cd "${1:-.}" 2>/dev/null \
   || { echo "gitignore-guard: FEHLER Verzeichnis nicht gefunden: ${1:-.}" >&2; exit 1; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || { echo "gitignore-guard: FEHLER kein Git-Work-Tree" >&2; exit 1; }
-cd "$(git rev-parse --show-toplevel)" || exit 1
+# Der Block ist root-verankert (jede Zeile mit führendem `/`) und gehört in die
+# .gitignore der Work-Tree-WURZEL. Ein `cd "$(git rev-parse --show-toplevel)"`
+# würde ein übergebenes Monorepo-Unterverzeichnis kommentarlos verlassen: es
+# schriebe die FREMDE Root-.gitignore, meldete den Restbefund als
+# `.claude/flowkit-version` statt `pkg-a/.claude/flowkit-version` — und für
+# `pkg-a/.claude/` bliebe der Block wirkungslos. Deshalb hier abbrechen statt
+# umziehen. Verglichen wird physisch (`pwd -P`), sonst schlägt der Vergleich
+# schon an einem Symlink im Pfad fehl (macOS: /tmp -> /private/tmp).
+top="$(git rev-parse --show-toplevel 2>/dev/null)"
+top_phys="$(cd "$top" 2>/dev/null && pwd -P)"
+if [ -z "$top_phys" ] || [ "$(pwd -P)" != "$top_phys" ]; then
+  echo "gitignore-guard: FEHLER ${1:-.} ist nicht die Wurzel des Work-Trees (${top:-unbekannt}); nichts geändert" >&2
+  exit 1
+fi
 
-ignored() { git check-ignore -q -- "$1"; }   # -q, NIE -v (siehe Kopf)
+# `--no-index`: nur die Ignore-Regeln zählen, nicht der Index (siehe Kopf).
+ignored() { git check-ignore -q --no-index -- "$1"; }   # -q, NIE -v (siehe Kopf)
 
 # 1) Alten Block entfernen -> Ausgangszustand. Macht den Lauf idempotent UND
 #    selbstheilend: der Bedarf wird gegen die .gitignore OHNE unseren Block
@@ -58,17 +79,33 @@ ignored() { git check-ignore -q -- "$1"; }   # -q, NIE -v (siehe Kopf)
 #    AUSSERHALB des Repos verhindert, dass ein Abbruch eine `.gitignore.tmp` im
 #    fremden Arbeitsbaum liegen lässt; zurückgeschrieben wird mit `cat >`, nicht
 #    mit `mv`, damit Rechte und Inode der .gitignore erhalten bleiben.
+#    Die END-Marke wird über dasselbe PRÄFIX erkannt wie die BEGIN-Marke. Ein
+#    exakter Zeilenvergleich liess awk bei jeder Byte-Abweichung (CRLF-
+#    Normalisierung bei `core.autocrlf=true`, Handänderung) bis EOF im
+#    skip-Zweig — gelöscht wurde ALLES ab der BEGIN-Marke, inklusive der eigenen
+#    Regeln des Zielrepos, und gemeldet wurde `fixed` mit Exit 0. Findet awk zur
+#    BEGIN-Marke gar keine END-Marke, wird deshalb NICHT geschrieben (Exit 2 aus
+#    dem awk-END-Block), sondern mit Fehler abgebrochen.
 if [ -f .gitignore ] && grep -q "^$BEGIN_MARK" .gitignore; then
   tmp="$(mktemp)" || { echo "gitignore-guard: FEHLER mktemp fehlgeschlagen" >&2; exit 1; }
-  if awk -v b="$BEGIN_MARK" -v e="$END" \
-       'index($0, b) == 1 { skip = 1; next } $0 == e { skip = 0; next } !skip { print }' \
-       .gitignore > "$tmp" && cat "$tmp" > .gitignore; then
+  awk -v b="$BEGIN_MARK" -v e="$END" \
+      'index($0, b) == 1 { skip = 1; next }
+       index($0, e) == 1 { skip = 0; next }
+       !skip { print }
+       END { if (skip) exit 2 }' \
+      .gitignore > "$tmp"
+  awk_rc=$?
+  if [ "$awk_rc" -eq 2 ]; then
     rm -f "$tmp"
-  else
+    echo "gitignore-guard: FEHLER markierter Block ohne END-Marke '$END' — .gitignore unverändert gelassen" >&2
+    exit 1
+  fi
+  if [ "$awk_rc" -ne 0 ] || ! cat "$tmp" > .gitignore; then
     rm -f "$tmp"
     echo "gitignore-guard: FEHLER .gitignore nicht schreibbar" >&2
     exit 1
   fi
+  rm -f "$tmp"
 fi
 
 # 2) Bedarf ermitteln — je Zeile des Blocks eine eigene Prüfung.

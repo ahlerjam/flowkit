@@ -16,6 +16,8 @@
 #   (d) Randfälle                — Restbefund, fehlender Newline, kein Work-Tree,
 #                                  fehlende .gitignore, globale excludesFile
 #   (e) Blockmarke               — Wiedererkennung über das Präfix, Kopplung an setup.md
+#   (f) Zerstörungsfälle         — Lauf nach dem Installations-Commit, beschädigte
+#                                  END-Marke, Aufruf aus einem Unterverzeichnis
 set -u
 
 SCRIPT="${1:-$(cd "$(dirname "$0")" && pwd)/gitignore-guard.sh}"
@@ -237,9 +239,96 @@ check "(e) Guard führt die END-Marke"          grep -q "END='# <<< flowkit'" "$
 # umdrehen; `-q -v` zusammen sind ein fatal error. Der Guard darf nur `-q`.
 # Kommentare werden vor dem Grep entfernt — der Kopf des Guards ERKLÄRT die
 # Falle und darf `-v` deshalb erwähnen.
-check "(e) Guard prüft mit check-ignore -q"    grep -q 'git check-ignore -q -- "\$1"' "$SCRIPT"
+check "(e) Guard prüft mit check-ignore -q"    grep -q 'git check-ignore -q --no-index -- "\$1"' "$SCRIPT"
 check "(e) kein check-ignore -v im Code"       bash -c '! sed "s/#.*//" "$1" | grep -q "check-ignore.*-v"' _ "$SCRIPT"
 check "(e) CI führt diese Suite aus"           grep -q 'test-gitignore-guard.sh' .github/workflows/tests.yml
+
+# ---------------------------------------------------------------- (f)
+# Zerstörungsfälle. Kein Fall der Sektionen (a)–(e) committet und keiner
+# beschädigt den Block — genau deshalb blieben die drei Defekte hier unentdeckt.
+
+# T11 — der dokumentierte Update-Pfad: Schritt 8 von /flowkit:setup committet die
+# freigestellten Dateien, ein späteres /flowkit:setup läuft erneut. Misst der
+# Guard den Bedarf MIT Index, meldet `git check-ignore` jeden getrackten Pfad als
+# „nicht ignoriert": der zweite Lauf schrumpft den Block auf `/.flowkit/`, und
+# die Nachprüfung ist aus demselben Grund blind und meldet Erfolg. Danach
+# scheitert `git add` jedes NEUEN Hooks — die Selbstheilung kehrt sich um.
+newrepo
+git config user.email flowkit@example.invalid
+git config user.name flowkit-test
+printf '.claude/\n' > .gitignore
+seed
+: > .claude/settings.local.json
+run .
+check "(f) T11 erster Lauf Exit 0"                 rc_is 0
+cp .gitignore "$TMPROOT/before-commit"
+git add .gitignore .claude/flowkit-version .claude/settings.json \
+        .claude/workflow.config.json .claude/hooks >/dev/null 2>&1
+git commit -qm "chore: install flowkit" >/dev/null 2>&1
+check "(f) T11 Vorbedingung: Dateien getrackt" \
+  bash -c 'git ls-files --error-unmatch .claude/hooks/pushci-guard.sh >/dev/null 2>&1'
+run .
+check "(f) T11 zweiter Lauf Exit 0"                rc_is 0
+check "(f) T11 .gitignore byte-identisch"          diff -q "$TMPROOT/before-commit" .gitignore
+check "(f) T11 Freistellung erhalten"              bash -c 'grep -qx "!/\.claude/flowkit-version" .gitignore'
+check "(f) T11 Hook-Freistellung erhalten"         bash -c 'grep -qx "!/\.claude/hooks/\*\.sh" .gitignore'
+: > .claude/hooks/neuer-hook.sh
+check "(f) T11 neuer Hook stagebar"                bash -c 'git add .claude/hooks/neuer-hook.sh >/dev/null 2>&1'
+check "(f) T11 settings.local.json bleibt ignoriert" ign_ .claude/settings.local.json
+
+# T12 — F-2, Variante „ein Byte daneben": die END-Marke wird über dasselbe
+# PRÄFIX erkannt wie die BEGIN-Marke. Beim exakten Zeilenvergleich fraß awk ab
+# der BEGIN-Marke alles bis EOF — die eigenen Regeln des Zielrepos verschwanden,
+# gemeldet wurde `fixed` mit Exit 0.
+newrepo
+printf '.claude/\n' > .gitignore
+seed
+run .
+printf 'dist/\ncoverage.xml\n' >> .gitignore
+sed 's/^# <<< flowkit$/# <<< flowkit /' .gitignore > "$TMPROOT/gi" && cat "$TMPROOT/gi" > .gitignore
+run .
+check "(f) T12 abweichende END-Marke: Exit 0"      rc_is 0
+check "(f) T12 Fremdregel dist/ erhalten"          bash -c 'grep -qx "dist/" .gitignore'
+check "(f) T12 Fremdregel coverage.xml erhalten"   bash -c 'grep -qx "coverage.xml" .gitignore'
+check "(f) T12 dist/ weiterhin ignoriert"          ign_ dist/x
+check "(f) T12 genau ein Block"                    bash -c '[ "$(grep -c "^# >>> flowkit" .gitignore)" -eq 1 ]'
+check "(f) T12 Stempeldatei versionierbar"         free_ .claude/flowkit-version
+
+# T13 — F-2, Variante „END-Marke ganz weg": jetzt ist nicht mehr entscheidbar,
+# wo der Block endet. Kürzen wäre Datenverlust, also gar nicht schreiben.
+newrepo
+printf '.claude/\n' > .gitignore
+seed
+run .
+printf 'dist/\n' >> .gitignore
+grep -v '^# <<< flowkit' .gitignore > "$TMPROOT/gi" && cat "$TMPROOT/gi" > .gitignore
+cp .gitignore "$TMPROOT/before-broken"
+run .
+check "(f) T13 fehlende END-Marke: Exit 1"         rc_is 1
+check "(f) T13 Fehlertext nennt die END-Marke"     contains "ohne END-Marke '# <<< flowkit'"
+check "(f) T13 .gitignore unverändert"             diff -q "$TMPROOT/before-broken" .gitignore
+check "(f) T13 dist/ weiterhin ignoriert"          ign_ dist/x
+
+# T14 — F-17: Monorepo-Unterverzeichnis. Jede Blockzeile ist root-verankert, der
+# Block gehört also in die .gitignore der Work-Tree-Wurzel. Ein `cd` dorthin
+# verließ das übergebene Verzeichnis kommentarlos: geschrieben wurde die FREMDE
+# Root-.gitignore, für `pkg-a/.claude/` blieb der Block wirkungslos, und der
+# Restbefund nannte `.claude/…` statt `pkg-a/.claude/…`.
+newrepo
+printf '.claude/\n' > .gitignore
+seed
+cp .gitignore "$TMPROOT/before-sub"
+mkdir -p pkg-a/.claude/hooks
+: > pkg-a/.claude/flowkit-version
+run pkg-a
+check "(f) T14 Unterverzeichnis: Exit 1"           rc_is 1
+check "(f) T14 Meldung nennt die Wurzel"           contains "nicht die Wurzel des Work-Trees"
+check "(f) T14 Root-.gitignore unverändert"        diff -q "$TMPROOT/before-sub" .gitignore
+check "(f) T14 kein Block in der Root-.gitignore"  bash -c '! grep -q "^# >>> flowkit" .gitignore'
+# Gegenprobe: die Wurzel selbst bleibt erlaubt, auch als absoluter Pfad.
+run "$PWD"
+check "(f) T14 absoluter Wurzelpfad erlaubt"       rc_is 0
+check "(f) T14 Block jetzt geschrieben"            bash -c 'grep -q "^# >>> flowkit" .gitignore'
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALLE TESTS GRÜN"; else echo "$fails TEST(S) ROT"; exit 1; fi
