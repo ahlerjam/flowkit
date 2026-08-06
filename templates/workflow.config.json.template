@@ -69,8 +69,8 @@
       "L": "high"
     },
     "builder": {
-      "SM": "high",
-      "L": "xhigh"
+      "SM": "medium",
+      "L": "high"
     },
     "verifier": "high",
     "security": "high",

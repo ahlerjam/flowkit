@@ -160,7 +160,7 @@ const test = (name, fn) => tests.push({ name, fn })
 test('Effort: die reasoning-tragenden Stationen bekommen einen expliziten Wert (#45)', async () => {
   const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
   assert.equal(only(calls, 'plan #1').opts.effort, 'medium', 'Planner ohne Effort oder mit falschem Default')
-  assert.equal(only(calls, 'build #1').opts.effort, 'high', 'Builder ohne Effort oder mit falschem Default')
+  assert.equal(only(calls, 'build #1').opts.effort, 'medium', 'Builder ohne Effort oder mit falschem Default')
   assert.equal(only(calls, 'ac-verify #1').opts.effort, 'high', 'AC-Verifier ohne Effort')
   // Der Security-Pass läuft nur für geschützte Bereiche — eigene Einheit dafür.
   const sec = await runWorkflow({
@@ -173,7 +173,7 @@ test('Effort: die reasoning-tragenden Stationen bekommen einen expliziten Wert (
 test('Effort: Größe L hebt Planner und Builder eine Stufe an (#45)', async () => {
   const { calls } = await runWorkflow({ units: [unit(1, { size: 'L' })], config: cfg() })
   assert.equal(only(calls, 'plan #1').opts.effort, 'high')
-  assert.equal(only(calls, 'build #1').opts.effort, 'xhigh')
+  assert.equal(only(calls, 'build #1').opts.effort, 'high')
 })
 
 // Die Station-Karte allein reicht als Kriterium NICHT: ob effort gesetzt werden
@@ -191,7 +191,7 @@ test('Effort: eine auf haiku KONFIGURIERTE Station bekommt ebenfalls keinen Wert
   assert.equal(only(calls, 'ac-verify #1').opts.effort, undefined,
     'AC-Verifier läuft auf haiku, bekommt aber einen effort-Wert')
   // Gegenprobe: der Builder steht weiter auf sonnet und behält seinen Wert.
-  assert.equal(only(calls, 'build #1').opts.effort, 'high')
+  assert.equal(only(calls, 'build #1').opts.effort, 'medium')
 })
 
 // Das Security-Modell kam bisher aus einem zweiten, direkt an den Aufrufen
@@ -231,7 +231,7 @@ test('Effort: Eskalation hebt Modell UND Effort, ohne die Modellkarte zu veränd
   })
   const fix1 = only(calls, 'fix1 #1')
   assert.equal(fix1.opts.model, 'sonnet', 'Runde 1 eskaliert noch nicht — Modellkarte hat sich verändert')
-  assert.equal(fix1.opts.effort, 'high', 'Runde 1 ohne Eskalation fährt den Builder-Effort')
+  assert.equal(fix1.opts.effort, 'medium', 'Runde 1 ohne Eskalation fährt den Builder-Effort')
   const fix2 = only(calls, 'fix2 #1 esc')
   assert.equal(fix2.opts.model, 'opus', 'Modell-Eskalation (NEXT_TIER) ist nicht mehr wirksam')
   assert.equal(fix2.opts.effort, 'xhigh', 'Effort-Eskalation greift bei der eskalierten Runde nicht')

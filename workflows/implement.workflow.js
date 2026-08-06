@@ -104,10 +104,13 @@ const EFFORT_DEFAULT = {
   // ausgewogene Punkt für Agenten-Aufgaben; bei L trägt der Plan die ganze
   // Einheit und bekommt deshalb high.
   planner: { SM: 'medium', L: 'high' },
-  // Die eine Station, für die die Doku xhigh ausdrücklich empfiehlt. Bei S/M
-  // läuft sie auf sonnet, wo xhigh nicht durchgängig verfügbar ist — dort
-  // high, bei L (opus) xhigh.
-  builder: { SM: 'high', L: 'xhigh' },
+  // Die einzige Station mit offener agentischer Coding-Arbeit. Die Doku nennt
+  // dafür xhigh als Startpunkt — hier steht bewusst eine Stufe darunter, weil
+  // dieselbe Quelle low/medium als den primären Hebel für Tokenkosten und
+  // Laufzeit beschreibt, "wherever your evals show quality holds". Das ist eine
+  // Kostenentscheidung, keine Korrektur der Empfehlung: wer die Qualität an
+  // seinen eigenen Läufen misst und Luft sieht, hebt hier auf high/xhigh an.
+  builder: { SM: 'medium', L: 'high' },
   // Verifikation statt Konstruktion: eine feste Kriterienliste abarbeiten und
   // belegen. Gründlichkeit zählt, Exploration nicht — high, nicht xhigh.
   verifier: 'high',

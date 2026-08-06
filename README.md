@@ -136,7 +136,7 @@ what a station actually does rather than by how important it is:
 | Station | Default | Why |
 |---|---|---|
 | planner | `medium` (S/M), `high` (L) | Writes a plan, not code; the prompt supplies the structure. On L the plan carries the whole unit. |
-| builder | `high` (S/M), `xhigh` (L) | The only station doing open-ended agentic coding — the case Anthropic's docs name for `xhigh`. |
+| builder | `medium` (S/M), `high` (L) | The only station doing open-ended agentic coding. Anthropic's docs name `xhigh` as the starting point for that; this sits one step below on purpose — the same source calls `low`/`medium` the primary control for token cost and latency "wherever your evals show quality holds". Raise it if your own runs show headroom. |
 | ac-verify | `high` | Works a fixed criteria list; thoroughness matters, exploration does not. |
 | security | `high` | Same shape, but a missed blocker costs more than an extra round. |
 | escalation | `xhigh` | A fix round that already stepped up a model tier gets more room too. |
@@ -149,8 +149,10 @@ parameter — where it appears above it pins the value rather than raising it,
 so a station no longer inherits whatever effort the operator's session had.
 
 **Availability caveat:** `xhigh` does not exist on every model (notably not on
-Sonnet 4.6), which is why it only appears where the model map says opus. If you
-change `models`, re-check `effort` alongside it. Source for the guidance:
+Sonnet 4.6), which is why the default only uses it for the escalation, where
+the model map already says opus. If you raise `builder` to `xhigh`, check which
+model that station actually runs on first — and re-check `effort` whenever you
+change `models`. Source for the guidance:
 `platform.claude.com/docs/en/build-with-claude/effort`, retrieved 2026-08-06.
 
 ## License

@@ -61,7 +61,7 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   the two are separate maps and the escalation after a failed fix round raises
   both from `models.escalation` and `effort.escalation`, so neither silently
   moves the other. Defaults: planner `medium`/`high` (S/M vs L), builder
-  `high`/`xhigh`, ac-verify `high`, security `high`, escalation `xhigh`; the
+  `medium`/`high`, ac-verify `high`, security `high`, escalation `xhigh`; the
   mechanical Haiku stations get no value at all, because Haiku does not support
   the parameter. Invalid values (including `adaptive`, which is a *thinking*
   mode, not an effort level) stop the run at the config guard rather than being
@@ -72,8 +72,12 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   retrieved 2026-08-06. Three findings shaped the defaults. Effort affects
   *all* tokens including tool calls, so per station the question is how broadly
   it may work, not how clever it should be. `xhigh` is the level Anthropic
-  names for coding and agentic work, which here is exactly one station — the
-  builder. And the issue's suspicion that more effort is not monotonically
+  names as the starting point for coding and agentic work — which here is
+  exactly one station, the builder; the default deliberately sits one step
+  below it, because the same source calls `low`/`medium` the primary control
+  for token cost and latency "wherever your evals show quality holds". That is
+  a cost decision to re-check against real runs, not a correction of the
+  guidance. And the issue's suspicion that more effort is not monotonically
   better checks out, but not where it was expected: the documented overthinking
   risk sits at `max` ("adds significant cost for relatively small quality
   gains… can lead to overthinking"), not between `medium` and `high` — so `max`
