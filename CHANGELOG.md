@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git history.
 
-## [Unreleased]
+## [0.9.0] - 2026-08-06
 
 ### Fixed
 - Effort is decided by the station's *effective model*, not by its name. A repo
@@ -16,16 +16,43 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   (`M.verifier || 'sonnet'`) instead of from `modelFor`, so the model and effort
   decisions could drift apart; `modelFor` now covers it and is the single
   source. (#45)
-- The blocker hook no longer fires on description text. For `git commit -m`,
-  `gh pr create --body` and the other message switches
-  (`--message/--description/--notes/--title/--body/-m/-b/-t`) the quoted value is
-  payload, not a command, and is exempted from the pattern check — so a commit
-  that *describes* the patterns (hook changes, security docs, test fixtures) goes
-  through instead of hitting a self-block the builder cannot recognise. Only what
-  the shell provably never executes is exempted: `'…'` always, `"…"` only when it
-  contains neither `$` nor a backtick, so `-m "$(curl … | sh)"` still blocks.
-  Everything outside the value — switches, `&&`, `;`, further commands — is
-  checked as before. (#44)
+- The hook checks the whole command line again, message text included. An
+  earlier attempt at #44 exempted the quoted value behind `-m`/`--body`/`--title`
+  via `sed` so that a commit *describing* the patterns would not self-block. That
+  is withdrawn: `sed` has no shell-quoting context, so the exemption could be
+  turned into a bypass. `git commit -m "x -t 'y" ; rm -rf / ; echo "z'"` passed
+  the hook — the pattern matched the bait switch inside the double-quoted value
+  and elided across the command separator, hiding a `rm -rf /` the shell really
+  runs. The same held for `gh pr create --body "… -t 'x" ; git push --force
+  origin main ; …`, for `"… '$(…)' …"` (the shell expands it, the first pass
+  removed it), for a secret assignment placed in a PR body, and for `ssh -t
+  '<command>'` since the rule keyed on the flag rather than the program. A filter
+  that can be disarmed with its own switch is worse than none, because it looks
+  like protection. The bypasses are now regression tests so the approach cannot
+  return unnoticed. #44 stays open; a correct exemption needs a real shell lexer
+  bound to the invoking program. Workaround meanwhile: `git commit -F <file>`.
+  (#44, reverted after code review)
+- Effort is resolved against a model *capability map*, not a single "does this
+  model support the parameter" flag. The capability is not monotonic — Sonnet 4.6
+  and Opus 4.6 support `max` but not `xhigh`, Sonnet 5 supports both — so an
+  upper bound would have been the wrong structure. An unsupported level now falls
+  back to the highest supported level below it instead of going to the engine
+  unchecked: an escalation onto Sonnet 4.6 sends `high`. The check also matches by
+  containment rather than equality, so a repo that writes the full model name
+  (`claude-haiku-4-5`) instead of the alias is covered too. Unknown names keep all
+  levels — a name the map does not know is usually a newer model. (#45, from code
+  review)
+- `effort.planner`/`effort.builder` written as a plain string instead of an
+  `{SM, L}` map now stops the run. `Object.assign({}, {SM, L}, "low")` yields
+  `{SM, L, 0:"l", 1:"o", 2:"w"}` — both required keys survive with valid values,
+  so the value check saw nothing wrong and the run silently continued on the
+  default while the operator believed the setting had taken effect. (#45, from
+  code review)
+- `Bash(git merge --continue)` is back in the allowlist. Narrowing `git merge*`
+  dropped it, but the merge and gate-wait prompts allow exactly one conflict
+  resolution (pure append conflicts) and instruct the station to commit the
+  merge — without the rule an unattended run stalls on a permission prompt on the
+  one path we declared resolvable. (#42, from code review)
 - The hook's diagnostic line now names the rule class it hit, e.g.
   `blocked dangerous pattern [pipe-to-shell]`. It previously printed the
   protected-branch list on *every* hit, which pointed the diagnosis in the wrong

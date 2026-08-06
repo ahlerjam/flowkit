@@ -11,26 +11,28 @@ cmd=$(jq -r '.tool_input.command // ""' 2>/dev/null) \
 [ -n "$cmd" ] || exit 0
 
 # ---------------------------------------------------------------------------
-# Nachrichtentext ausklammern (Issue #44)
+# Geprüft wird der vollständige Kommandotext (Issue #44)
 # ---------------------------------------------------------------------------
-# Bei `git commit -m "…"` und `gh pr create --body "…"` ist der gequotete Wert
-# NUTZLAST, kein auszuführendes Kommando — die Shell reicht ihn unverändert an
-# das Programm weiter. Ohne diese Ausklammerung blockiert der Hook genau die
-# Commits, die ÜBER seine eigenen Muster schreiben (Hook-Änderungen,
-# Sicherheitsdoku, Testfixturen); im unbeaufsichtigten Lauf ist das eine
-# Eigenblockade, die der Builder nicht als solche erkennt.
+# 0.8.x hat hier versucht, den Wert hinter -m/--body/--title per sed
+# auszuklammern, damit ein Commit, der ÜBER diese Muster schreibt, nicht an der
+# eigenen Regel scheitert. Das ist zurückgenommen, weil der Ansatz nicht
+# reparierbar ist: sed kennt keinen Shell-Quoting-Kontext. Ein Muster wie
+# '[^']*' kann nicht wissen, ob ein Apostroph ein Quote ÖFFNET oder nur in
+# einem Doppelquote-Wert steht — `git commit -m "x -t 'y" ; rm -rf / ; echo
+# "z'"` liess die Ausklammerung über den Kommandotrenner hinweg greifen und
+# blendete ein real ausgeführtes `rm -rf /` aus der Prüfung aus. Ebenso fiel
+# `"… '$(…)' …"` heraus, obwohl die Shell die Substitution ausführt, und die
+# Regel griff programmunabhängig, also auch bei `ssh -t '<kommando>'`.
 #
-# Ausgeklammert wird nur, was die Shell garantiert nicht ausführt:
-#   '…'  — innerhalb einfacher Anführungszeichen gibt es keine Expansion.
-#   "…"  — nur wenn weder $ noch ` darin vorkommen; sonst würde eine
-#          Kommandosubstitution mit ausgeklammert und der Block umgangen.
-# Alles außerhalb des Werts (Schalter, Verkettungen mit && ; |, weitere
-# Kommandos) bleibt erhalten und wird weiterhin geprüft.
-MSG_FLAGS='--message|--description|--notes|--title|--body|-m|-b|-t'
-scan=$(printf '%s' "$cmd" \
-  | sed -E "s/(^|[[:space:]])($MSG_FLAGS)(=|[[:space:]]*)'[^']*'/\\1\\2\\3'FLOWKIT_MESSAGE_ELIDED'/g" \
-  | sed -E "s/(^|[[:space:]])($MSG_FLAGS)(=|[[:space:]]*)\"[^\"\$\`]*\"/\\1\\2\\3\"FLOWKIT_MESSAGE_ELIDED\"/g")
-[ -n "$scan" ] || scan="$cmd"   # sed-Ausfall darf keine Prüfung überspringen
+# Ein Filter, der sich mit seinem eigenen Schalter aushebeln lässt, ist
+# schlechter als kein Filter, weil er Sicherheit vortäuscht. Wer den
+# Ausschluss erneut angehen will, braucht einen echten Shell-Lexer und muss
+# ihn an das aufrufende Programm binden — nicht an das Flag allein.
+#
+# Preis: der Hook blockiert wieder Commit-Messages, die die Muster wörtlich
+# enthalten. Ausweg im Alltag ist `git commit -F <datei>` oder eine
+# umformulierte Nachricht.
+scan="$cmd"
 
 # ---------------------------------------------------------------------------
 # Regelklassen

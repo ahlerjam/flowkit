@@ -127,9 +127,23 @@ const EFFORT = (() => {
   if (typeof e !== 'object' || e === null || Array.isArray(e)) {
     throw new Error(`flowkit: effort muss ein Objekt sein (ist ${JSON.stringify(C.effort)}).`)
   }
+  // planner/builder sind Karten (SM/L). Ein String an dieser Stelle ist der
+  // naheliegende Fehlgriff ("effort": {"builder": "low"}) und wäre ohne diesen
+  // Guard unsichtbar: Object.assign({}, {SM,L}, 'low') ergibt
+  // {SM,L,0:'l',1:'o',2:'w'} — SM und L bleiben gültig, der Wertecheck unten
+  // schöpft keinen Verdacht, und der Lauf fährt weiter auf der Voreinstellung,
+  // während der Operator seine Einstellung für wirksam hält.
+  const sized = (key) => {
+    const v = e[key]
+    if (v === undefined || v === null) return Object.assign({}, EFFORT_DEFAULT[key])
+    if (typeof v !== 'object' || Array.isArray(v)) {
+      throw new Error(`flowkit: effort.${key} muss ein Objekt mit SM und L sein (ist ${JSON.stringify(v)}) — ein einzelner Wert würde still verpuffen und die Voreinstellung stehen lassen. Richtig: {"${key}": {"SM": "medium", "L": "high"}}.`)
+    }
+    return Object.assign({}, EFFORT_DEFAULT[key], v)
+  }
   const merged = {
-    planner: Object.assign({}, EFFORT_DEFAULT.planner, e.planner || {}),
-    builder: Object.assign({}, EFFORT_DEFAULT.builder, e.builder || {}),
+    planner: sized('planner'),
+    builder: sized('builder'),
     verifier: e.verifier || EFFORT_DEFAULT.verifier,
     security: e.security || EFFORT_DEFAULT.security,
     escalation: e.escalation || EFFORT_DEFAULT.escalation,
@@ -148,10 +162,34 @@ const EFFORT = (() => {
   check(merged.escalation, 'escalation')
   return merged
 })()
-// Modelle ohne effort-Unterstützung. Haiku 4.5 steht nicht auf der Liste der
-// effort-fähigen Modelle (Quelle wie oben) — eine Station auf haiku bekommt den
-// Parameter deshalb NIE, egal welche Station sie ist.
-const EFFORT_UNSUPPORTED = ['haiku']
+// Welches Modell kann welchen Effort-Level?
+// Quelle: platform.claude.com/docs/en/build-with-claude/effort, abgerufen
+// 2026-08-06. Zwei Dinge daraus sind für die Karte entscheidend:
+//   1. Haiku steht überhaupt nicht auf der Liste der effort-fähigen Modelle.
+//   2. Die Fähigkeit ist NICHT monoton — "xhigh is a newer level; some models
+//      that support max don't support xhigh". Sonnet 4.6 und Opus 4.6 können
+//      `max`, aber kein `xhigh`. Eine Obergrenze wäre deshalb die falsche
+//      Datenstruktur; es braucht die Menge der unterstützten Werte.
+// Gematcht wird per Enthaltensein, nicht per Gleichheit: models.* ist im Schema
+// ein freier String, ein Repo darf also 'sonnet' ODER 'claude-sonnet-4-6'
+// eintragen. Spezifischere Tokens stehen zuerst.
+const NO_XHIGH = ['low', 'medium', 'high', 'max']
+const EFFORT_SUPPORT = [
+  ['haiku', []],
+  ['sonnet-4-6', NO_XHIGH],
+  ['opus-4-6', NO_XHIGH],
+  ['opus-4-5', ['low', 'medium', 'high']],
+]
+// Unbekannte Modellnamen bekommen bewusst ALLE Level: ein String, den diese
+// Tabelle nicht kennt, ist im Regelfall ein neueres Modell, und ein stilles
+// Herunterstufen wäre schlechter als der Fehler, den die Engine sonst meldet.
+// Die Aliase 'sonnet'/'opus' fallen ebenfalls hierunter — sie zeigen auf die
+// jeweils aktuelle Version, und die kann xhigh.
+const effortLevelsFor = (model) => {
+  const m = String(model || '')
+  for (const [token, levels] of EFFORT_SUPPORT) if (m.includes(token)) return levels
+  return EFFORT_LEVELS
+}
 // ac-verify:v2 (Issue #8): v2-Kommentare tragen zusätzlich zur Tabelle einen
 // maschinenlesbaren JSON-Block {"verdicts":[{ac,met,evidence}]} — Folgerunden
 // diffen dagegen und weisen Regressionen (met -> unmet) explizit aus.
@@ -239,14 +277,27 @@ const modelFor = (station, u, esc) => {
 // gibt es keinen Wert. Deshalb wird hier nach dem effektiven Modell gefragt und
 // nicht nach dem Stationsnamen — ein Repo darf jede Station auf haiku stellen.
 const effortFor = (station, u, esc) => {
-  if (EFFORT_UNSUPPORTED.includes(modelFor(station, u, esc))) return undefined
-  if (esc) return EFFORT.escalation
   const size = u && u.size === 'L' ? 'L' : 'SM'
-  if (station === 'planner') return EFFORT.planner[size]
-  if (station === 'builder') return EFFORT.builder[size]
-  if (station === 'verifier') return EFFORT.verifier
-  if (station === 'security') return EFFORT.security
-  return undefined // mechanische Stationen
+  const want =
+    esc ? EFFORT.escalation :
+    station === 'planner' ? EFFORT.planner[size] :
+    station === 'builder' ? EFFORT.builder[size] :
+    station === 'verifier' ? EFFORT.verifier :
+    station === 'security' ? EFFORT.security :
+    undefined // mechanische Stationen
+  if (want === undefined) return undefined
+  const levels = effortLevelsFor(modelFor(station, u, esc))
+  if (levels.length === 0) return undefined          // Modell kennt den Parameter nicht
+  if (levels.includes(want)) return want
+  // Der Wunschwert existiert auf diesem Modell nicht (z. B. xhigh nach einer
+  // Eskalation auf Sonnet 4.6). Nicht abbrechen und nicht ungeprüft senden,
+  // sondern auf den höchsten unterstützten Wert DARUNTER zurückfallen: der
+  // Lauf soll an der Stelle weiterkommen, an der er gerade eskaliert, um sich
+  // zu fangen.
+  for (let i = EFFORT_LEVELS.indexOf(want) - 1; i >= 0; i--) {
+    if (levels.includes(EFFORT_LEVELS[i])) return EFFORT_LEVELS[i]
+  }
+  return undefined
 }
 
 const gateCmds = [C.commands.test, C.commands.lint, C.commands.typecheck]

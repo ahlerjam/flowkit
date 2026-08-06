@@ -10,7 +10,7 @@
       "Bash(gh milestone list*)", "Bash(gh sub-issue*)", "Bash(gh run list*)", "Bash(gh run view*)",
       "Bash(gh label list*)", "Bash(gh api repos/*/branches/*/protection)",
       "Bash(git push*)", "Bash(git switch*)",
-      "Bash(git merge origin/*)", "Bash(git merge --abort)",
+      "Bash(git merge origin/*)", "Bash(git merge --abort)", "Bash(git merge --continue)",
       "Bash(jq *)", "Bash(mktemp *)",
       "Bash(bash {{PLUGIN_ROOT}}/scripts/*)", "Bash(python3 {{PLUGIN_ROOT}}/scripts/*)",
       "Bash(bash {{PLUGIN_ROOT}}/templates/hooks/*)",

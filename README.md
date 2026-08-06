@@ -148,11 +148,17 @@ lead to overthinking on structured-output tasks. `high` equals omitting the
 parameter — where it appears above it pins the value rather than raising it,
 so a station no longer inherits whatever effort the operator's session had.
 
-**Availability caveat:** `xhigh` does not exist on every model (notably not on
-Sonnet 4.6), which is why the default only uses it for the escalation, where
-the model map already says opus. If you raise `builder` to `xhigh`, check which
-model that station actually runs on first — and re-check `effort` whenever you
-change `models`. Source for the guidance:
+**Availability is handled for you, not left to you.** Not every model supports
+every level, and the capability is *not* monotonic — Sonnet 4.6 and Opus 4.6
+support `max` but not `xhigh` ("xhigh is a newer level; some models that
+support max don't support xhigh"), while Sonnet 5 supports both. Haiku does not
+support the parameter at all. The workflow therefore keeps a capability map and
+resolves the value against the station's *effective* model: an unsupported
+level falls back to the highest supported level below it (an escalation onto
+Sonnet 4.6 sends `high`, not `xhigh`), and a station on Haiku gets no parameter.
+Unknown model strings are assumed to support everything — a name the map does
+not know is usually a newer model, and silently downgrading it would be worse
+than the error the engine would raise. Source:
 `platform.claude.com/docs/en/build-with-claude/effort`, retrieved 2026-08-06.
 
 ## License

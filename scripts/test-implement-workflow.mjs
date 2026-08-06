@@ -252,6 +252,64 @@ test('Effort: Repo-Config überschreibt die Voreinstellung (#45)', async () => {
   assert.equal(only(sec.calls, 'security #2').opts.effort, 'medium')
 })
 
+// models.* ist im Schema ein freier String — ein Repo darf statt des Alias
+// 'haiku' auch den vollen Modellnamen eintragen. Ein Exact-Match gegen 'haiku'
+// greift dort nicht und schickt einen Parameter an ein Modell, das ihn nicht
+// kennt.
+test('Effort: auch ein VOLLER haiku-Modellname bekommt keinen Wert (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ models: { verifier: 'claude-haiku-4-5' } }),
+  })
+  assert.equal(only(calls, 'ac-verify #1').opts.model, 'claude-haiku-4-5', 'Modellkarte greift nicht — der Test prüft ins Leere')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, undefined,
+    'voller haiku-Modellname umgeht die Fähigkeitsprüfung — sie vergleicht auf Gleichheit statt auf Enthaltensein')
+})
+
+// Die Fähigkeit ist NICHT monoton: Sonnet 4.6 und Opus 4.6 unterstützen `max`,
+// aber nicht `xhigh` (Quelle: die Effort-Doku, "xhigh is a newer level; some
+// models that support max don't support xhigh"). Ein Wunschwert, den das
+// gewählte Modell nicht kennt, darf weder an die Engine gehen noch den Lauf
+// abbrechen — er fällt auf den höchsten unterstützten Wert DARUNTER zurück.
+test('Effort: ein Modell ohne xhigh bekommt den höchsten unterstützten Wert darunter (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3, models: { escalation: 'claude-sonnet-4-6' } }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'claude-sonnet-4-6', 'Eskalations-Modell greift nicht — der Test prüft ins Leere')
+  assert.equal(fix2.opts.effort, 'high',
+    'xhigh geht an ein Modell, das den Wert nicht kennt (Sonnet 4.6 kann max, aber kein xhigh) — erwartet ist der Rückfall auf high')
+})
+
+// Gegenprobe zur Fähigkeitskarte: der Alias 'sonnet' zeigt auf Sonnet 5, und
+// das KANN xhigh. Ohne diesen Fall würde ein pauschaler Sonnet-Ausschluss
+// unbemerkt durchgehen und jede Eskalation still herunterstufen.
+test('Effort: der Alias sonnet unterstützt xhigh und wird NICHT heruntergestuft (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3, models: { builder: { SM: 'haiku', L: 'haiku' } } }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'sonnet', 'Eskalation von haiku landet laut NEXT_TIER auf sonnet')
+  assert.equal(fix2.opts.effort, 'xhigh', 'sonnet (= Sonnet 5) kann xhigh — hier darf nichts heruntergestuft werden')
+})
+
+// Object.assign({}, {SM,L}, 'low') ergibt {SM,L,0:'l',1:'o',2:'w'} — SM und L
+// bleiben gültig, der Guard schöpft keinen Verdacht, und der Operator hält
+// eine wirkungslose Einstellung für wirksam.
+test('Effort: eine Stationskarte als String stoppt den Lauf, statt still zu verpuffen (#45)', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { builder: 'low' } }) }),
+    /effort\.builder/i,
+    'effort.builder als String wird von Object.assign verschluckt — der Lauf fährt weiter auf der Voreinstellung, ohne das zu sagen')
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { planner: ['low'] } }) }),
+    /effort\.planner/i)
+})
+
 test('Effort: ungültiger Wert stoppt den Lauf am Guard, statt still zu greifen (#45)', async () => {
   await assert.rejects(
     () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { verifier: 'sehr hoch' } }) }),
@@ -298,6 +356,30 @@ test('Config-Migrationen: jeder Template-Key ist entweder Baseline oder migriert
     assert.ok(Object.prototype.hasOwnProperty.call(tpl, top),
       `config-migrations.json migriert "${m.field}", aber das Template kennt "${top}" nicht (mehr) — Migration entfernen oder Template ergänzen.`)
     assert.ok(m.version && m.note, `Migration für "${m.field}" ohne version oder note`)
+  }
+})
+
+// /flowkit:setup liest die Plugin-Version aus plugin.json und schreibt sie als
+// Stempel nach .claude/flowkit-version und in jeden installierten Hook; im
+// selben Lauf wendet es die Migrationen an und meldet sie mit IHRER Version.
+// Deklariert eine Migration eine Version, die das Plugin noch gar nicht hat,
+// bekommt das Zielrepo den älteren Stempel bei bereits angewandter neuerer
+// Migration — die SessionStart-Drift-Prüfung vergleicht dann gegen einen
+// Stand, den das Repo schon hat, und fordert nie zum Re-Setup auf. Der
+// 0.8.0-Release hat den Bump deshalb im selben Commit wie seine Migrationen
+// mitgeführt (bdec8e6).
+test('Config-Migrationen: keine Migration ist neuer als die Plugin-Version', async () => {
+  const migrations = JSON.parse(readFileSync(new URL('../templates/config-migrations.json', import.meta.url), 'utf8'))
+  const plugin = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'))
+  const num = (v) => String(v).split('.').map(Number)
+  const newer = (a, b) => {
+    const [x, y] = [num(a), num(b)]
+    for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0)
+    return false
+  }
+  for (const m of migrations) {
+    assert.ok(!newer(m.version, plugin.version),
+      `Migration für "${m.field}" deklariert ${m.version}, plugin.json steht auf ${plugin.version} — der Versionsstempel im Zielrepo wäre älter als die angewandte Migration. Plugin-Version mitziehen (und den CHANGELOG-Abschnitt aus [Unreleased] herausschneiden).`)
   }
 })
 
@@ -1845,7 +1927,13 @@ test('Allowlist deckt die git-merge-Aufrufe des Runners weiterhin ab (#42)', asy
   // deckt jeden Befehl ab, der mit dem Text davor beginnt; eine Regel ohne `*`
   // nur den wörtlich gleichen Befehl.
   const covered = (cmd) => rules.some((r) => (r.endsWith('*') ? cmd.startsWith(r.slice(0, -1)) : cmd === r))
-  for (const cmd of ['git merge origin/main', 'git merge origin/develop', 'git merge --abort']) {
+  // `git merge --continue` gehört dazu: der Prompt der Merge- und der
+  // Gate-Wait-Station erlaubt genau EINE Konfliktauflösung (reiner
+  // Append-Konflikt) und weist an, den Merge danach zu committen. Fehlt der
+  // Aufruf in der Allowlist, hängt der unbeaufsichtigte Lauf an dieser Stelle
+  // an einem Permission-Prompt, den niemand beantwortet — und zwar auf dem
+  // einen Pfad, den wir als auflösbar deklariert haben.
+  for (const cmd of ['git merge origin/main', 'git merge origin/develop', 'git merge --abort', 'git merge --continue']) {
     assert.ok(covered(cmd), `Allowlist deckt "${cmd}" nicht mehr ab — der Runner braucht diesen Aufruf`)
   }
   for (const cmd of ['git mergetool', 'git mergetool --tool=vimdiff', 'git merge-file a b c', 'git merge-tree x y', 'git difftool', 'git difftool --extcmd=id']) {
