@@ -145,19 +145,10 @@ const EFFORT = (() => {
   check(merged.escalation, 'escalation')
   return merged
 })()
-// Spiegelbild von modelFor: gleiche Stationsnamen, gleiche Größen-/Eskalations-
-// Achse, aber eine EIGENE Karte. Die beiden Funktionen greifen bewusst nicht
-// ineinander — eine Modell-Eskalation verschiebt keinen Effort-Wert und
-// umgekehrt.
-const effortFor = (station, u, esc) => {
-  if (esc) return EFFORT.escalation
-  const size = u && u.size === 'L' ? 'L' : 'SM'
-  if (station === 'planner') return EFFORT.planner[size]
-  if (station === 'builder') return EFFORT.builder[size]
-  if (station === 'verifier') return EFFORT.verifier
-  if (station === 'security') return EFFORT.security
-  return undefined // mechanische Stationen (haiku) — Modell unterstützt effort nicht
-}
+// Modelle ohne effort-Unterstützung. Haiku 4.5 steht nicht auf der Liste der
+// effort-fähigen Modelle (Quelle wie oben) — eine Station auf haiku bekommt den
+// Parameter deshalb NIE, egal welche Station sie ist.
+const EFFORT_UNSUPPORTED = ['haiku']
 // ac-verify:v2 (Issue #8): v2-Kommentare tragen zusätzlich zur Tabelle einen
 // maschinenlesbaren JSON-Block {"verdicts":[{ac,met,evidence}]} — Folgerunden
 // diffen dagegen und weisen Regressionen (met -> unmet) explizit aus.
@@ -229,9 +220,30 @@ const modelFor = (station, u, esc) => {
   let m =
     station === 'planner' ? ((M.planner || {})[size] || 'sonnet') :
     station === 'builder' ? ((M.builder || {})[size] || 'sonnet') :
-    station === 'verifier' ? (M.verifier || 'sonnet') : 'sonnet'
+    // Der Security-Pass ist eine Verifikations-Station und folgt derselben
+    // Modellkarte wie der AC-Verifier. Bis 0.8.0 stand dieser Ausdruck direkt
+    // an den beiden agent()-Aufrufen — zwei Quellen für eine Entscheidung, an
+    // denen die Effort-Wahl vorbeilaufen konnte.
+    (station === 'verifier' || station === 'security') ? (M.verifier || 'sonnet') : 'sonnet'
   if (esc) m = M.escalation || NEXT_TIER[m] || 'opus'
   return m
+}
+// Spiegelbild von modelFor: gleiche Stationsnamen, gleiche Größen- und
+// Eskalations-Achse, aber eine EIGENE Karte. Die beiden greifen bewusst nicht
+// ineinander — eine Modell-Eskalation verschiebt keinen Effort-Wert und
+// umgekehrt. Die eine Kopplung, die es gibt, ist keine Kalibrierung, sondern
+// eine Fähigkeitsfrage: unterstützt das gewählte Modell den Parameter nicht,
+// gibt es keinen Wert. Deshalb wird hier nach dem effektiven Modell gefragt und
+// nicht nach dem Stationsnamen — ein Repo darf jede Station auf haiku stellen.
+const effortFor = (station, u, esc) => {
+  if (EFFORT_UNSUPPORTED.includes(modelFor(station, u, esc))) return undefined
+  if (esc) return EFFORT.escalation
+  const size = u && u.size === 'L' ? 'L' : 'SM'
+  if (station === 'planner') return EFFORT.planner[size]
+  if (station === 'builder') return EFFORT.builder[size]
+  if (station === 'verifier') return EFFORT.verifier
+  if (station === 'security') return EFFORT.security
+  return undefined // mechanische Stationen
 }
 
 const gateCmds = [C.commands.test, C.commands.lint, C.commands.typecheck]
@@ -721,12 +733,12 @@ const runUnit = async (u) => {
 
   if (PROT.includes(u.area)) {
     if (over()) return budgetStop(`vor Security (PR #${pr})`)
-    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
+    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: modelFor('security', u, false), effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
       await agent(fixPrompt(n, pr, prBranch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()), effort: effortFor('builder', u, escNow()) })
-      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
+      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('security', u, false), effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
     if (sec && sec.blockers && sec.blockers.length) throw new Error(`GATE: Security-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(sec.blockers)}`)

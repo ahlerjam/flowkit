@@ -176,6 +176,38 @@ test('Effort: Größe L hebt Planner und Builder eine Stufe an (#45)', async () 
   assert.equal(only(calls, 'build #1').opts.effort, 'xhigh')
 })
 
+// Die Station-Karte allein reicht als Kriterium NICHT: ob effort gesetzt werden
+// darf, hängt am effektiv gewählten MODELL, nicht am Stationsnamen. Ein Repo,
+// das planner oder verifier bewusst auf haiku stellt (kleine, mechanische
+// Issues), bekäme sonst einen Parameter, den das Modell nicht kennt.
+test('Effort: eine auf haiku KONFIGURIERTE Station bekommt ebenfalls keinen Wert (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ models: { planner: { SM: 'haiku', L: 'haiku' }, builder: { SM: 'sonnet', L: 'opus' }, verifier: 'haiku' } }),
+  })
+  assert.equal(only(calls, 'plan #1').opts.model, 'haiku', 'Modellkarte greift nicht — der Test prüft ins Leere')
+  assert.equal(only(calls, 'plan #1').opts.effort, undefined,
+    'Planner läuft auf haiku, bekommt aber einen effort-Wert — das Kriterium hängt am Stationsnamen statt am Modell')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, undefined,
+    'AC-Verifier läuft auf haiku, bekommt aber einen effort-Wert')
+  // Gegenprobe: der Builder steht weiter auf sonnet und behält seinen Wert.
+  assert.equal(only(calls, 'build #1').opts.effort, 'high')
+})
+
+// Das Security-Modell kam bisher aus einem zweiten, direkt an den Aufrufen
+// eingebauten Ausdruck (M.verifier || 'sonnet') statt aus modelFor. Damit gab
+// es zwei Quellen für dieselbe Entscheidung — und die Effort-Wahl konnte gegen
+// die Modell-Wahl laufen.
+test('Effort/Modell: der Security-Pass folgt derselben Karte wie der Verifier (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'], models: { verifier: 'haiku' } }),
+  })
+  const sec = only(calls, 'security #2')
+  assert.equal(sec.opts.model, 'haiku', 'Security-Pass folgt models.verifier nicht mehr')
+  assert.equal(sec.opts.effort, undefined, 'Security-Pass läuft auf haiku, bekommt aber einen effort-Wert')
+})
+
 test('Effort: mechanische Haiku-Stationen bekommen KEINEN Wert (#45)', async () => {
   const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
   // Haiku steht nicht auf der Liste der effort-fähigen Modelle; ein gesetzter
@@ -230,6 +262,43 @@ test('Effort: ungültiger Wert stoppt den Lauf am Guard, statt still zu greifen 
   await assert.rejects(
     () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { builder: { SM: 'adaptive', L: 'high' } } }) }),
     /effort/i)
+})
+
+// Bestehende Repos bekommen neue Config-Keys NUR über
+// templates/config-migrations.json — /flowkit:setup arbeitet die Liste beim
+// Update ab. Ein Key, der nur im Template steht, erreicht sie nie: er greift
+// zwar über die eingebaute Voreinstellung, taucht aber in ihrer Config nicht
+// auf und ist für den Operator damit unsichtbar und nicht anpassbar. Genau das
+// war beim ersten Anlauf von #45 passiert.
+//
+// CONFIG_BASELINE sind die Keys aus der Zeit vor dem Migrationsmechanismus
+// (< 0.3.0). Alles, was danach dazukam, gehört in die Migrationsliste — ein
+// neuer Key lässt diesen Test failen, bis er dort steht.
+const CONFIG_BASELINE = new Set([
+  'repoSlug', 'defaultBranch', 'pushCommand', 'commands', 'extraGates',
+  'protectedAreas', 'areas', 'parallelism', 'caps', 'budgets', 'opusTurnWeight',
+  'models', 'autoReady', 'maxFixRounds', 'mergeCheck', 'overrideLabel',
+  'markers', 'milestoneExcludeRegex', 'excludeLabels', 'issueLimit',
+  'browserProof', 'notify', 'onSmokeFailure',
+])
+test('Config-Migrationen: jeder Template-Key ist entweder Baseline oder migriert', async () => {
+  const tpl = JSON.parse(readFileSync(new URL('../templates/workflow.config.json.template', import.meta.url), 'utf8'))
+  const migrations = JSON.parse(readFileSync(new URL('../templates/config-migrations.json', import.meta.url), 'utf8'))
+  // Migrationen adressieren teils verschachtelte Felder ("commands.setup") —
+  // für den Abgleich zählt das Top-Level-Segment.
+  const migrated = new Set(migrations.map((m) => String(m.field).split('.')[0]))
+  for (const key of Object.keys(tpl)) {
+    assert.ok(CONFIG_BASELINE.has(key) || migrated.has(key),
+      `Config-Key "${key}" steht im Template, aber weder in CONFIG_BASELINE noch in config-migrations.json — bestehende Repos bekämen ihn beim Update nie zu sehen. Eintrag in templates/config-migrations.json ergänzen (version, field, default, note).`)
+  }
+  // Gegenrichtung: eine Migration, deren Feld es im Template gar nicht gibt,
+  // schickt den Operator einem Key hinterher, den der Workflow nicht liest.
+  for (const m of migrations) {
+    const top = String(m.field).split('.')[0]
+    assert.ok(Object.prototype.hasOwnProperty.call(tpl, top),
+      `config-migrations.json migriert "${m.field}", aber das Template kennt "${top}" nicht (mehr) — Migration entfernen oder Template ergänzen.`)
+    assert.ok(m.version && m.note, `Migration für "${m.field}" ohne version oder note`)
+  }
 })
 
 test('Effort: Template und Schema liefern die Sektion aus (#45)', async () => {

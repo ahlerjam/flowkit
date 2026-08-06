@@ -34,5 +34,17 @@
     "field": "ciInfraSignatures",
     "default": [],
     "note": "Zusätzliche Logsignaturen für die Infrastruktur-Erkennung der Gate-Wait-Station (`gh run rerun --failed` statt einer Fix-Runde). Die fünf Standard-Signaturen sind eingebaut — hier nur repo-eigene ergänzen, leeres Array ist der Normalfall. Beim Update zusätzlich prüfen, dass `.claude/settings.json` in permissions.allow `Bash(gh run rerun*)` und `Bash(tail *)` enthält (das Leerzeichen vor dem `*` gehört dazu — es erzwingt eine Wortgrenze, damit die Regel nicht auch `tailscale …` freigibt) (Schritt 5 mergt beide aus dem Template) — sonst blockiert der Permission-Prompt Diagnose und Re-Run im unbeaufsichtigten Lauf (Issue #36)."
+  },
+  {
+    "version": "0.9.0",
+    "field": "effort",
+    "default": {
+      "planner": { "SM": "medium", "L": "high" },
+      "builder": { "SM": "high", "L": "xhigh" },
+      "verifier": "high",
+      "security": "high",
+      "escalation": "xhigh"
+    },
+    "note": "Reasoning Effort je Station, getrennt von der Modellstufe: `models` waehlt WELCHES Modell, `effort` WIE VIEL Aufwand es in die Antwort steckt. Ohne die Sektion erbt jede Station den Effort des aufrufenden Kontexts — der Wert haengt dann davon ab, wie der Operator die Sitzung gestartet hat. Die eingebaute Voreinstellung entspricht dem `default` hier; die Sektion in die Config zu schreiben macht sie sichtbar und anpassbar. Beim Uebernehmen die eigene `models`-Karte gegenpruefen: `xhigh` gibt es nicht auf jedem Modell (u. a. nicht auf Sonnet 4.6), deshalb steht es nur dort, wo die Standardkarte opus vorsieht (Groesse L und Eskalation). Steht eine Station auf haiku, laesst der Workflow den Parameter selbst weg — Haiku unterstuetzt ihn nicht. Ungueltige Werte (auch \"adaptive\", das ein Thinking-Modus ist) stoppen den Lauf am Config-Guard (Issue #45)."
   }
 ]

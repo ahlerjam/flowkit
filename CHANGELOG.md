@@ -9,6 +9,13 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 ## [Unreleased]
 
 ### Fixed
+- Effort is decided by the station's *effective model*, not by its name. A repo
+  that puts `models.planner` or `models.verifier` on haiku was getting an
+  `effort` value on a model that does not support the parameter. The security
+  pass also picked its model from a second expression inlined at the call sites
+  (`M.verifier || 'sonnet'`) instead of from `modelFor`, so the model and effort
+  decisions could drift apart; `modelFor` now covers it and is the single
+  source. (#45)
 - The blocker hook no longer fires on description text. For `git commit -m`,
   `gh pr create --body` and the other message switches
   (`--message/--description/--notes/--title/--body/-m/-b/-t`) the quoted value is
@@ -71,6 +78,17 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   risk sits at `max` ("adds significant cost for relatively small quality
   gains… can lead to overthinking"), not between `medium` and `high` — so `max`
   appears nowhere in the defaults, and no station was lowered on that theory.
+- Config-migration coverage assertion: every top-level key in
+  `workflow.config.json.template` must be either in the pre-0.3.0 baseline or
+  in `config-migrations.json`, and every migration must point at a key the
+  template still has. Existing repos only ever receive new config keys through
+  that list, so a key added to the template alone works via the built-in
+  default but stays invisible and unadjustable in the operator's own config —
+  which is exactly what happened to `effort` on the first pass.
+- Rule-class completeness probe in `test-pretooluse-blocker.sh`, mirroring the
+  existing one for the secret alternation: every `rule` class in the hook needs
+  a `must_block_as` case, so the rule list can't grow without its diagnostic
+  ever being checked.
 - Hardening assertion for subcommand prefixes: every `Bash(git <sub>*)` /
   `Bash(gh <topic> <sub>*)` rule must match exactly one real subcommand or be
   listed in `WIDE_SUBCOMMAND_PREFIXES` with a reason. The existing assertion only
