@@ -48,6 +48,29 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
   has widened the allowlist again on its own. (#42)
 
 ### Added
+- `effort` config section: reasoning effort is now set per station instead of
+  every station inheriting whatever effort the calling session happened to run
+  at. `models` picks *which* model, `effort` picks *how much work it puts in*;
+  the two are separate maps and the escalation after a failed fix round raises
+  both from `models.escalation` and `effort.escalation`, so neither silently
+  moves the other. Defaults: planner `medium`/`high` (S/M vs L), builder
+  `high`/`xhigh`, ac-verify `high`, security `high`, escalation `xhigh`; the
+  mechanical Haiku stations get no value at all, because Haiku does not support
+  the parameter. Invalid values (including `adaptive`, which is a *thinking*
+  mode, not an effort level) stop the run at the config guard rather than being
+  passed through. Rationale and the availability caveat for `xhigh` are in the
+  README. (#45)
+
+  Research basis: `platform.claude.com/docs/en/build-with-claude/effort`,
+  retrieved 2026-08-06. Three findings shaped the defaults. Effort affects
+  *all* tokens including tool calls, so per station the question is how broadly
+  it may work, not how clever it should be. `xhigh` is the level Anthropic
+  names for coding and agentic work, which here is exactly one station — the
+  builder. And the issue's suspicion that more effort is not monotonically
+  better checks out, but not where it was expected: the documented overthinking
+  risk sits at `max` ("adds significant cost for relatively small quality
+  gains… can lead to overthinking"), not between `medium` and `high` — so `max`
+  appears nowhere in the defaults, and no station was lowered on that theory.
 - Hardening assertion for subcommand prefixes: every `Bash(git <sub>*)` /
   `Bash(gh <topic> <sub>*)` rule must match exactly one real subcommand or be
   listed in `WIDE_SUBCOMMAND_PREFIXES` with a reason. The existing assertion only

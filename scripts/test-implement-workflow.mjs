@@ -140,6 +140,107 @@ const tests = []
 const test = (name, fn) => tests.push({ name, fn })
 
 // 1. Happy path: zwei Einheiten seriell, beide merged, Report konsistent.
+// ---------------------------------------------------------------------------
+// Reasoning Effort je Station (Issue #45)
+// ---------------------------------------------------------------------------
+// Bis 0.8.0 wählte der Workflow nur die MODELLSTUFE; opts.effort blieb überall
+// ungesetzt, jede Station erbte also den Effort-Wert des aufrufenden Kontexts.
+// Damit gab es keinerlei Trennung zwischen "welches Modell" und "wie viel
+// Denkaufwand" — und der Wert, den eine Station bekam, hing davon ab, wie der
+// Operator die Sitzung gestartet hatte.
+//
+// Quelle für die Belegung: platform.claude.com/docs/en/build-with-claude/effort
+// (abgerufen 2026-08-06). Zwei Punkte daraus tragen die Tests unten:
+//   - effort wird NICHT von jedem Modell unterstützt; Haiku 4.5 steht nicht auf
+//     der Liste. Die mechanischen Haiku-Stationen dürfen deshalb keinen Wert
+//     gesetzt bekommen (sie leisten ohnehin kein Reasoning über Code, sondern
+//     lesen und schreiben Zustand).
+//   - xhigh gibt es nur auf einem Teil der Modelle; ein ungültiger Wert darf
+//     nicht still durchrutschen, sondern muss den Lauf am Config-Guard stoppen.
+test('Effort: die reasoning-tragenden Stationen bekommen einen expliziten Wert (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'medium', 'Planner ohne Effort oder mit falschem Default')
+  assert.equal(only(calls, 'build #1').opts.effort, 'high', 'Builder ohne Effort oder mit falschem Default')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, 'high', 'AC-Verifier ohne Effort')
+  // Der Security-Pass läuft nur für geschützte Bereiche — eigene Einheit dafür.
+  const sec = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'] }),
+  })
+  assert.equal(only(sec.calls, 'security #2').opts.effort, 'high', 'Security-Pass ohne Effort')
+})
+
+test('Effort: Größe L hebt Planner und Builder eine Stufe an (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1, { size: 'L' })], config: cfg() })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'high')
+  assert.equal(only(calls, 'build #1').opts.effort, 'xhigh')
+})
+
+test('Effort: mechanische Haiku-Stationen bekommen KEINEN Wert (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  // Haiku steht nicht auf der Liste der effort-fähigen Modelle; ein gesetzter
+  // Wert wäre je nach Engine ein Fehler oder stiller Ballast.
+  for (const c of calls.filter((x) => x.opts.model === 'haiku')) {
+    assert.equal(c.opts.effort, undefined,
+      `Station "${c.label}" läuft auf haiku und darf keinen effort-Wert bekommen (Modell unterstützt den Parameter nicht)`)
+  }
+  assert.ok(calls.some((c) => c.opts.model === 'haiku'), 'kein einziger haiku-Aufruf im Lauf — der Test prüft ins Leere')
+})
+
+// Die Eskalation hebt bisher NUR die Modellstufe (NEXT_TIER). Effort muss
+// orthogonal dazu laufen: eine eskalierte Fix-Runde bekommt beides, und die
+// Modell-Eskalation selbst bleibt unverändert — sonst wäre die eine Änderung
+// eine stille Verschiebung der anderen.
+test('Effort: Eskalation hebt Modell UND Effort, ohne die Modellkarte zu verändern (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3 }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix1 = only(calls, 'fix1 #1')
+  assert.equal(fix1.opts.model, 'sonnet', 'Runde 1 eskaliert noch nicht — Modellkarte hat sich verändert')
+  assert.equal(fix1.opts.effort, 'high', 'Runde 1 ohne Eskalation fährt den Builder-Effort')
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'opus', 'Modell-Eskalation (NEXT_TIER) ist nicht mehr wirksam')
+  assert.equal(fix2.opts.effort, 'xhigh', 'Effort-Eskalation greift bei der eskalierten Runde nicht')
+})
+
+test('Effort: Repo-Config überschreibt die Voreinstellung (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ effort: { planner: { SM: 'low', L: 'low' }, builder: { SM: 'max', L: 'max' }, verifier: 'low', security: 'medium', escalation: 'max' } }),
+  })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'low')
+  assert.equal(only(calls, 'build #1').opts.effort, 'max')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, 'low')
+  const sec = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'], effort: { security: 'medium' } }),
+  })
+  assert.equal(only(sec.calls, 'security #2').opts.effort, 'medium')
+})
+
+test('Effort: ungültiger Wert stoppt den Lauf am Guard, statt still zu greifen (#45)', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { verifier: 'sehr hoch' } }) }),
+    /effort/i,
+    'ein Tippfehler im effort-Wert muss den Lauf stoppen — sonst schickt er still einen ungültigen Parameter an die Engine')
+  // "adaptive" ist ein THINKING-Modus, kein Effort-Level; die Verwechslung ist
+  // in der Anthropic-Doku eigens erwähnt und gehört deshalb festgeschrieben.
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { builder: { SM: 'adaptive', L: 'high' } } }) }),
+    /effort/i)
+})
+
+test('Effort: Template und Schema liefern die Sektion aus (#45)', async () => {
+  const tpl = JSON.parse(readFileSync(new URL('../templates/workflow.config.json.template', import.meta.url), 'utf8'))
+  assert.ok(tpl.effort, 'workflow.config.json.template hat keine effort-Sektion — neue Repos bekämen sie nie zu sehen')
+  assert.equal(tpl.effort.verifier, 'high')
+  assert.ok(tpl.effort.planner && tpl.effort.builder, 'planner/builder fehlen in der Template-Sektion')
+  const schema = JSON.parse(readFileSync(new URL('../templates/workflow.config.schema.json', import.meta.url), 'utf8'))
+  assert.ok(schema.properties.effort, 'workflow.config.schema.json kennt effort nicht — eine gesetzte Sektion wäre schema-widrig')
+})
+
 test('Happy path: 2 Einheiten, parallelism 1 — beide merged, done korrekt', async () => {
   const { report, calls } = await runWorkflow({ units: [unit(1), unit(2)], config: cfg() })
   assert.equal(report.stopped, null)

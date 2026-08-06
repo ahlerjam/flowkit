@@ -311,7 +311,10 @@ statt still ewig zu blockieren.
   Draft gesetzt: die Deep-Review-Pipeline überspringt Drafts, und genau ihr
   Urteil braucht der Mensch, der übernimmt (#35). Der LAUF fährt mit dem
   nächsten Issue fort. Eskalation passiert INNERHALB der Einheit: ab Fix-Runde 2
-  laufen Fixes genau eine Modellstufe höher (CONFIG.models.escalation).
+  laufen Fixes genau eine Modellstufe höher (CONFIG.models.escalation) UND mit
+  dem Eskalations-Effort (CONFIG.effort.escalation). Beide Karten sind getrennt:
+  Modellstufe und Denkaufwand eskalieren gemeinsam, aber unabhängig voneinander
+  konfigurierbar.
 - **Lauf bereits angehalten** (ein früherer Post-Merge war rot, die
   `onSmokeFailure`-Policy lief): Einheiten, die zu diesem Zeitpunkt schon im
   Merge-Lock warten, werden NICHT mehr gemergt — sie enden als `needs-human` mit

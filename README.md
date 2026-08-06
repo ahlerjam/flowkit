@@ -116,8 +116,42 @@ directly — the install arrives as a pull request.
 
 Everything lives in `.claude/workflow.config.json` per repository — commands
 (test/lint/typecheck/smoke), protected areas, parallelism, budgets, models,
-auto-ready policy, markers and the merge check. See
+effort, auto-ready policy, markers and the merge check. See
 `templates/workflow.config.json.template` and the JSON schema next to it.
+
+### Model tier vs. reasoning effort
+
+`models` picks *which* model runs a station; `effort` picks *how much work* it
+puts into the response. The two are independent — a station can run on a
+cheaper model at high effort, or on a strong one at low effort — and the
+escalation after a failed fix round raises both, from separate maps
+(`models.escalation`, `effort.escalation`), so neither silently moves the
+other.
+
+Effort affects **all** tokens of a response, tool calls included: lower effort
+means fewer and more consolidated tool calls and less preamble, higher effort
+means more calls and more explanation. That is why the default is graded by
+what a station actually does rather than by how important it is:
+
+| Station | Default | Why |
+|---|---|---|
+| planner | `medium` (S/M), `high` (L) | Writes a plan, not code; the prompt supplies the structure. On L the plan carries the whole unit. |
+| builder | `high` (S/M), `xhigh` (L) | The only station doing open-ended agentic coding — the case Anthropic's docs name for `xhigh`. |
+| ac-verify | `high` | Works a fixed criteria list; thoroughness matters, exploration does not. |
+| security | `high` | Same shape, but a missed blocker costs more than an extra round. |
+| escalation | `xhigh` | A fix round that already stepped up a model tier gets more room too. |
+| mechanical (haiku) | *unset* | Reads and writes state, no reasoning about code — and Haiku does not support the parameter at all. |
+
+`max` is deliberately absent: per Anthropic's effort documentation it "adds
+significant cost for relatively small quality gains" on most workloads and can
+lead to overthinking on structured-output tasks. `high` equals omitting the
+parameter — where it appears above it pins the value rather than raising it,
+so a station no longer inherits whatever effort the operator's session had.
+
+**Availability caveat:** `xhigh` does not exist on every model (notably not on
+Sonnet 4.6), which is why it only appears where the model map says opus. If you
+change `models`, re-check `effort` alongside it. Source for the guidance:
+`platform.claude.com/docs/en/build-with-claude/effort`, retrieved 2026-08-06.
 
 ## License
 

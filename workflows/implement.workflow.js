@@ -66,6 +66,98 @@ const PUSH = C.pushCommand || 'git push'
 const MAXFIX = C.maxFixRounds || 3
 const PAR = Math.max(1, Math.min((C.caps && C.caps.maxParallel) || 4, C.parallelism || 1, HAS_PAR ? 4 : 1))
 const M = C.models || {}
+// Reasoning Effort je Station (Issue #45). Bis 0.8.0 wählte der Workflow nur
+// die Modellstufe; opts.effort blieb ungesetzt, jede Station erbte also den
+// Wert des aufrufenden Kontexts — welchen Denkaufwand eine Station bekam, hing
+// davon ab, wie der Operator die Sitzung gestartet hatte.
+//
+// Belegung nach platform.claude.com/docs/en/build-with-claude/effort
+// (abgerufen 2026-08-06). Vier Punkte von dort tragen die Voreinstellung:
+//   1. Der Parameter wirkt auf ALLE Tokens einer Antwort, auch auf die
+//      Tool-Aufrufe: niedriger Effort heißt weniger und stärker gebündelte
+//      Aufrufe, höherer heißt mehr Aufrufe und mehr Erklärung drumherum.
+//      Für eine Station ist damit nicht "wie schlau", sondern "wie breit darf
+//      sie arbeiten" die eigentliche Frage.
+//   2. Für Coding- und Agenten-Arbeit empfiehlt die Doku xhigh (Opus 4.7/4.8
+//      als Startpunkt, Opus 5 als Hochstufung aus dem Default heraus). Das
+//      trifft genau eine Station dieses Workflows: den Builder.
+//   3. max ist ausdrücklich NICHT die sichere Obergrenze — "on most workloads
+//      max adds significant cost for relatively small quality gains, and on
+//      some structured-output or less intelligence-sensitive tasks it can lead
+//      to overthinking". Die im Issue vermutete Overthinking-Gefahr existiert
+//      also, sie sitzt aber am oberen Ende und nicht zwischen medium und high.
+//      Deshalb steht max nirgends in der Voreinstellung.
+//   4. high ist der API-Default und verhält sich identisch zum Weglassen des
+//      Parameters. Wo hier high steht, ist das eine bewusste Festschreibung
+//      gegen das Erben eines fremden Werts, keine Erhöhung.
+//
+// ACHTUNG Modellverfügbarkeit: xhigh gibt es nur auf einem Teil der Modelle
+// (u. a. Opus 4.7/4.8/5 und Sonnet 5, NICHT auf Sonnet 4.6), und Haiku 4.5
+// unterstützt den Parameter gar nicht. Deshalb steht xhigh nur dort, wo die
+// Modellkarte opus vorsieht (Größe L und Eskalation), und die mechanischen
+// Haiku-Stationen bekommen gar keinen Wert. Wer die Modellkarte umstellt,
+// prüft die effort-Sektion mit.
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+const EFFORT_DEFAULT = {
+  // Der Planner schreibt einen Plan, keinen Code — die Aufgabe ist eng
+  // umrissen und der Prompt liefert die Struktur. medium ist laut Doku der
+  // ausgewogene Punkt für Agenten-Aufgaben; bei L trägt der Plan die ganze
+  // Einheit und bekommt deshalb high.
+  planner: { SM: 'medium', L: 'high' },
+  // Die eine Station, für die die Doku xhigh ausdrücklich empfiehlt. Bei S/M
+  // läuft sie auf sonnet, wo xhigh nicht durchgängig verfügbar ist — dort
+  // high, bei L (opus) xhigh.
+  builder: { SM: 'high', L: 'xhigh' },
+  // Verifikation statt Konstruktion: eine feste Kriterienliste abarbeiten und
+  // belegen. Gründlichkeit zählt, Exploration nicht — high, nicht xhigh.
+  verifier: 'high',
+  // Wie der Verifier, aber ein übersehener Blocker ist teurer als eine
+  // zusätzliche Runde.
+  security: 'high',
+  // Orthogonal zur Modell-Eskalation (NEXT_TIER): eine Fix-Runde, die eine
+  // Modellstufe höher fährt, bekommt zugleich mehr Spielraum — sie läuft dann
+  // ohnehin auf opus, wo xhigh verfügbar ist.
+  escalation: 'xhigh',
+}
+const EFFORT = (() => {
+  const e = C.effort === undefined ? {} : C.effort
+  if (typeof e !== 'object' || e === null || Array.isArray(e)) {
+    throw new Error(`flowkit: effort muss ein Objekt sein (ist ${JSON.stringify(C.effort)}).`)
+  }
+  const merged = {
+    planner: Object.assign({}, EFFORT_DEFAULT.planner, e.planner || {}),
+    builder: Object.assign({}, EFFORT_DEFAULT.builder, e.builder || {}),
+    verifier: e.verifier || EFFORT_DEFAULT.verifier,
+    security: e.security || EFFORT_DEFAULT.security,
+    escalation: e.escalation || EFFORT_DEFAULT.escalation,
+  }
+  // Jeder Wert wird geprüft, auch der aus der Voreinstellung: ein ungültiger
+  // Wert würde sonst still an die Engine durchgereicht. "adaptive" ist der
+  // häufigste Fehlgriff — das ist ein Thinking-Modus, kein Effort-Level.
+  const check = (v, where) => {
+    if (!EFFORT_LEVELS.includes(v)) {
+      throw new Error(`flowkit: effort.${where} ist ${JSON.stringify(v)} — erlaubt sind nur ${EFFORT_LEVELS.join(', ')}. ("adaptive" ist ein Thinking-Modus, kein Effort-Level.) Ein ungültiger Wert würde ungeprüft an die Engine gehen.`)
+    }
+  }
+  check(merged.planner.SM, 'planner.SM'); check(merged.planner.L, 'planner.L')
+  check(merged.builder.SM, 'builder.SM'); check(merged.builder.L, 'builder.L')
+  check(merged.verifier, 'verifier'); check(merged.security, 'security')
+  check(merged.escalation, 'escalation')
+  return merged
+})()
+// Spiegelbild von modelFor: gleiche Stationsnamen, gleiche Größen-/Eskalations-
+// Achse, aber eine EIGENE Karte. Die beiden Funktionen greifen bewusst nicht
+// ineinander — eine Modell-Eskalation verschiebt keinen Effort-Wert und
+// umgekehrt.
+const effortFor = (station, u, esc) => {
+  if (esc) return EFFORT.escalation
+  const size = u && u.size === 'L' ? 'L' : 'SM'
+  if (station === 'planner') return EFFORT.planner[size]
+  if (station === 'builder') return EFFORT.builder[size]
+  if (station === 'verifier') return EFFORT.verifier
+  if (station === 'security') return EFFORT.security
+  return undefined // mechanische Stationen (haiku) — Modell unterstützt effort nicht
+}
 // ac-verify:v2 (Issue #8): v2-Kommentare tragen zusätzlich zur Tabelle einen
 // maschinenlesbaren JSON-Block {"verdicts":[{ac,met,evidence}]} — Folgerunden
 // diffen dagegen und weisen Regressionen (met -> unmet) explizit aus.
@@ -527,11 +619,11 @@ const runUnit = async (u) => {
   }
 
   if (u.lane !== 'quick') {
-    await agent(planPrompt(n, u), { label: `plan #${n}`, phase: 'Implement', model: modelFor('planner', u, false) })
+    await agent(planPrompt(n, u), { label: `plan #${n}`, phase: 'Implement', model: modelFor('planner', u, false), effort: effortFor('planner', u, false) })
     if (over()) return budgetStop('nach Planner')
   }
 
-  const built = await agent(buildPrompt(n, u), { label: `build #${n}`, phase: 'Implement', model: modelFor('builder', u, false), isolation: 'worktree', schema: PR_SCHEMA })
+  const built = await agent(buildPrompt(n, u), { label: `build #${n}`, phase: 'Implement', model: modelFor('builder', u, false), effort: effortFor('builder', u, false), isolation: 'worktree', schema: PR_SCHEMA })
   if (!built) throw new Error('Builder lieferte kein Ergebnis (Agent-Abbruch)')
   // Budgetcheck ZUERST, PR-Check danach (Issue #31/#33): ein Builder, der sein
   // Budget sprengt, hat typischerweise noch gar keinen PR. Liefe die Station
@@ -614,27 +706,27 @@ const runUnit = async (u) => {
   const pr = seen.pr
   const prBranch = seen.branch
 
-  let verdict = await agent(verifyPrompt(n, pr, u, 0), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
+  let verdict = await agent(verifyPrompt(n, pr, u, 0), { label: `ac-verify #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), effort: effortFor('verifier', u, false), schema: VERIFY_SCHEMA })
   while (verdict && verdict.pass !== true && fixRounds < MAXFIX) {
     fixRounds += 1
     if (over()) return budgetStop(`in Fix-Runde ${fixRounds} (PR #${pr})`)
     // Das vorherige verdict-Objekt wandert in die Fix-Runde (Issue #8): der Fixer
     // kennt so die bereits erfüllten ACs und darf sie nicht kippen; der nächste
     // Verifier-Lauf (round > 0) diff't gegen den JSON-Block des Vorgängers.
-    await agent(fixPrompt(n, pr, prBranch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
-    verdict = await agent(verifyPrompt(n, pr, u, fixRounds), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), schema: VERIFY_SCHEMA })
+    await agent(fixPrompt(n, pr, prBranch, verdict.unmet || [], verdict), { label: `fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()), effort: effortFor('builder', u, escNow()) })
+    verdict = await agent(verifyPrompt(n, pr, u, fixRounds), { label: `ac-verify+${fixRounds} #${n}`, phase: 'Implement', model: modelFor('verifier', u, false), effort: effortFor('verifier', u, false), schema: VERIFY_SCHEMA })
   }
   if (!verdict || verdict.pass !== true) throw new Error(`GATE: AC-Verifier verfehlt nach ${fixRounds} Fix-Runde(n): ${JSON.stringify((verdict && verdict.unmet) || 'kein Verdict')}`)
 
 
   if (PROT.includes(u.area)) {
     if (over()) return budgetStop(`vor Security (PR #${pr})`)
-    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
+    let sec = await agent(securityPrompt(n, pr), { label: `security #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
     while (sec && sec.blockers && sec.blockers.length && fixRounds < MAXFIX) {
       fixRounds += 1
       if (over()) return budgetStop(`in Security-Fix-Runde ${fixRounds} (PR #${pr})`)
-      await agent(fixPrompt(n, pr, prBranch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()) })
-      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', schema: BLOCKERS_SCHEMA })
+      await agent(fixPrompt(n, pr, prBranch, sec.blockers, verdict), { label: `sec-fix${fixRounds} #${n}${escNow() ? ' esc' : ''}`, phase: 'Implement', model: modelFor('builder', u, escNow()), effort: effortFor('builder', u, escNow()) })
+      sec = await agent(securityPrompt(n, pr), { label: `security+${fixRounds} #${n}`, phase: 'Implement', model: M.verifier || 'sonnet', effort: effortFor('security', u, false), schema: BLOCKERS_SCHEMA })
     }
     if (!sec) throw new Error('GATE: Security-Station ohne Ergebnis (Agent ausgefallen)')
     if (sec && sec.blockers && sec.blockers.length) throw new Error(`GATE: Security-Blocker nach ${fixRounds} Runde(n): ${JSON.stringify(sec.blockers)}`)
