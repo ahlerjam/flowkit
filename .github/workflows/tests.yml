@@ -19,6 +19,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Der Versionsstempel-Test vergleicht die Commit-Zeiten von
+          # templates/ und plugin.json. Beim Standard-Klon (fetch-depth 1)
+          # liefert `git log -- <pfad>` nichts, der Test degradiert lautlos und
+          # waere in der CI ein Placebo.
+          fetch-depth: 0
 
       - name: cleanup-worktrees
         run: bash scripts/test-cleanup-worktrees.sh

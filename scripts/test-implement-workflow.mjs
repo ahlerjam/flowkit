@@ -359,6 +359,37 @@ test('Config-Migrationen: jeder Template-Key ist entweder Baseline oder migriert
   }
 })
 
+// Das Plugin wird als Directory-Marketplace direkt aus dem Repo installiert —
+// es gibt keinen separaten Release-Schritt, jeder Stand von main ist
+// potenziell ausgeliefert. Die Drift-Erkennung in inject-context.sh vergleicht
+// dabei nur STRINGS (`[ "$INSTALLED" = "$PLUGIN_VER" ]`): geht eine Aenderung
+// an templates/ ohne Versionsbump raus, bekommt das Zielrepo neue Dateien
+// unter altem Stempel und wird nie zum Re-Setup aufgefordert. Genau das ist
+// mit dem Lexer-Hook aus #44 passiert (templates/ geaendert, plugin.json bei
+// 0.9.0 stehengeblieben).
+//
+// Die Migrations-Pruefung darunter faengt das nicht: der Fix brachte keine
+// neue Config-Migration mit. Deshalb hier die allgemeinere Kausalitaet — was
+// ins Zielrepo kopiert wird, darf nicht juenger sein als die Version, die es
+// stempelt.
+test('Versionsstempel: templates/ ist nicht juenger als der letzte Versionsbump', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const root = new URL('..', import.meta.url).pathname
+  const lastTouch = (path) => {
+    try {
+      const out = execFileSync('git', ['-C', root, 'log', '-1', '--format=%ct', '--', path], { encoding: 'utf8' }).trim()
+      return out ? Number(out) : null
+    } catch { return null }
+  }
+  const vAt = lastTouch('.claude-plugin/plugin.json')
+  const tAt = lastTouch('templates/')
+  // Ohne Historie (flacher Klon, kein git) degradiert der Test lautlos, statt
+  // falsch rot zu werden. Die CI klont mit fetch-depth: 0, damit er dort greift.
+  if (vAt === null || tAt === null) return
+  assert.ok(tAt <= vAt,
+    'templates/ wurde nach dem letzten Bump von .claude-plugin/plugin.json geaendert. Ein Zielrepo bekaeme die neuen Templates unter dem ALTEN Versionsstempel und wuerde nie zum Re-Setup aufgefordert (inject-context.sh vergleicht die Versionsstrings). Plugin-Version im selben Commit mitziehen und den CHANGELOG-Abschnitt aus [Unreleased] herausschneiden.')
+})
+
 // /flowkit:setup liest die Plugin-Version aus plugin.json und schreibt sie als
 // Stempel nach .claude/flowkit-version und in jeden installierten Hook; im
 // selben Lauf wendet es die Migrationen an und meldet sie mit IHRER Version.
