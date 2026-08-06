@@ -1588,6 +1588,102 @@ test('Allowlist-Härte: keine Präfix-Regel ohne Wortgrenze, awk nur wörtlich',
     `settings.json.template deckt den einzigen awk-Aufruf des Prompts (${awkCall}) nicht wörtlich ab`)
 })
 
+// 35c. Die Härte-Prüfung aus 35b greift nur beim ERSTEN Wort einer Regel: in
+//      `Bash(git merge*)` steht vor dem `*` ein Leerzeichen-getrenntes zweites
+//      Wort, der Regex `^[^\s]*[^\s*]\*` findet dort nichts. Genau dort saß
+//      Issue #42: der Stern klebt am UNTERBEFEHL statt hinter einer Wortgrenze,
+//      und `git merge*` deckt damit auch `git mergetool` ab — ein Kommando, das
+//      über `mergetool.<tool>.cmd` eine frei wählbare Kommandozeile startet, die
+//      aus einer `.git/config` stammen kann, die der Runner nicht geschrieben
+//      hat. `git difftool` (aus `git diff*`) ist derselbe Fall.
+//
+//      Geprüft wird deshalb je Regel der Form `<prog> [<topic> ]<sub>*`, wie
+//      viele ECHTE Unterbefehle mit `<sub>` beginnen. Mehr als einer heißt: die
+//      Regel gibt mehr frei als ihr Name sagt, und sie muss ausdrücklich als
+//      bewusst weit markiert sein (WIDE_SUBCOMMAND_PREFIXES, mit Begründung).
+//
+//      Das Register ist bewusst statisch statt aus `git --list-cmds` / `gh --help`
+//      erhoben: der Test soll auf jedem Runner dasselbe Ergebnis liefern und
+//      nicht davon abhängen, welche git-Version oder welche gh-Extensions dort
+//      zufällig installiert sind. Preis dafür ist Pflege — deshalb lässt eine
+//      Regel für einen Namensraum OHNE Registereintrag den Test failen, statt
+//      still durchzulaufen.
+const SUBCOMMAND_REGISTRY = {
+  // git 2.51 (`git --list-cmds=main,others,nohelpers`), erhoben 2026-08-06.
+  git: 'add am annotate apply archimport archive backfill bisect blame branch bugreport bundle cat-file check-attr check-ignore check-mailmap check-ref-format checkout checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree config count-objects credential credential-cache credential-netrc credential-osxkeychain credential-store cvsexportcommit cvsimport cvsserver daemon describe diagnose diff diff-files diff-index diff-pairs diff-tree difftool fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck fsck-objects gc get-tar-commit-id grep hash-object help hook http-backend http-fetch http-push imap-send index-pack init init-db instaweb interpret-trailers jump last-modified log ls-files ls-remote ls-tree mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-octopus merge-one-file merge-ours merge-recursive merge-recursive-ours merge-recursive-theirs merge-resolve merge-subtree merge-tree mergetool mktag mktree multi-pack-index mv name-rev notes p4 pack-objects pack-redundant pack-refs patch-id pickaxe prune prune-packed pull push quiltimport range-diff read-tree rebase receive-pack reflog refs remote remote-ext remote-fd remote-ftp remote-ftps remote-http remote-https repack replace replay repo request-pull rerere reset restore rev-list rev-parse revert rm send-email send-pack shell shortlog show show-branch show-index show-ref sparse-checkout stage stash status stripspace submodule subtree switch symbolic-ref tag unpack-file unpack-objects update-index update-ref update-server-info upload-archive upload-pack var verify-commit verify-pack verify-tag version whatchanged worktree write-tree',
+  // gh 2.96.0 (`gh --help`), erhoben 2026-08-06, plus die beiden Extensions,
+  // die das Template selbst freigibt (gh-milestone, gh-sub-issue) — ohne sie
+  // stünden deren Regeln ohne Registereintrag da.
+  gh: 'accessibility actions alias api attestation auth browse cache codespace completion config extension gist gpg-key issue label milestone org pr preview project release repo ruleset run search secret ssh-key status sub-issue variable workflow',
+  // gh 2.96.0, je `gh <topic> --help`, erhoben 2026-08-06.
+  'gh issue': 'close comment create delete develop edit list lock pin reopen status transfer unlock unpin view',
+  'gh pr': 'checkout checks close comment create diff edit list lock merge ready reopen revert review status unlock update-branch view',
+  'gh run': 'cancel delete download list rerun view watch',
+  'gh label': 'clone create delete edit list',
+  // gh-milestone v2.2.0 / gh-sub-issue v0.5.1, je `--help`, erhoben 2026-08-06.
+  'gh milestone': 'completion create delete edit help list view',
+  'gh sub-issue': 'add completion create help list remove',
+}
+// Regel → Begründung, warum die Präfix-Kollision hier tragbar ist. Ein Eintrag
+// ohne passende Regel im Template ist ebenfalls ein FAIL: eine Ausnahmeliste,
+// die alte Zusagen konserviert, verliert ihre Aussagekraft.
+const WIDE_SUBCOMMAND_PREFIXES = {
+  'git commit': 'zusätzlich getroffen: commit-graph, commit-tree — beide Plumbing, die nur Objekte in .git schreiben und kein externes Programm starten; `git commit --no-verify` fängt zusätzlich der PreToolUse-Hook',
+  'git fetch': 'zusätzlich getroffen: fetch-pack — read-only Transport-Plumbing ohne Schreibzugriff auf das Arbeitsverzeichnis',
+}
+test('Allowlist-Härte: Unterbefehls-Präfixe treffen genau einen Unterbefehl (#42)', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  const parsed = JSON.parse(tpl.replace('{{STACK_ALLOW}}', '"Bash(uv run *)"'))
+  const rules = parsed.permissions.allow
+    .filter((r) => r.startsWith('Bash(')).map((r) => r.slice(5, -1))
+  const seenWide = new Set()
+  for (const r of rules) {
+    // Nur Regeln, deren LETZTES Wort ein reiner Bezeichner mit anklebendem `*`
+    // ist — `Bash(gh api repos/*/branches/*/protection)` endet auf einen
+    // Pfadausdruck ohne Stern und fällt nicht in diese Klasse.
+    const m = r.match(/^([a-z][a-z0-9-]*)(?: ([a-z][a-z0-9-]*))? ([a-z][a-z0-9-]*)\*$/)
+    if (!m) continue
+    const [, prog, topic, sub] = m
+    if (prog !== 'git' && prog !== 'gh') continue
+    const ns = topic ? `${prog} ${topic}` : prog
+    const known = SUBCOMMAND_REGISTRY[ns]
+    assert.ok(known,
+      `Allow-Regel "Bash(${r})" betrifft den Namensraum "${ns}", für den SUBCOMMAND_REGISTRY keine Unterbefehlsliste hat — ohne Liste prüft diese Assertion ins Leere. Liste ergänzen (Quelle und Erhebungsdatum im Kommentar vermerken).`)
+    const hits = known.split(' ').filter((c) => c.startsWith(sub))
+    const key = `${ns} ${sub}`
+    if (hits.length > 1) seenWide.add(key)
+    assert.ok(hits.length === 1 || key in WIDE_SUBCOMMAND_PREFIXES,
+      `Allow-Regel "Bash(${r})" ist ein Präfix-Match und trifft ${hits.length} Unterbefehle statt einen: ${hits.join(', ')}. Entweder die Regel auf den gemeinten Aufruf eingrenzen (z. B. "${ns} ${sub} <argumentpräfix>*" oder die wörtliche Form) oder sie in WIDE_SUBCOMMAND_PREFIXES mit Begründung eintragen.`)
+  }
+  for (const key of Object.keys(WIDE_SUBCOMMAND_PREFIXES)) {
+    assert.ok(seenWide.has(key),
+      `WIDE_SUBCOMMAND_PREFIXES führt "${key}" als bewusst weit, aber im Template gibt es keine kollidierende Regel dieser Form mehr — Eintrag entfernen, sonst deckt die Ausnahmeliste Regeln ab, die es nicht gibt.`)
+  }
+})
+
+// 35d. Gegenrichtung zu 35c: die Eingrenzung darf dem Runner nicht die
+//      Kommandos wegnehmen, die er wirklich fährt. Die Liste unten stammt aus
+//      workflows/implement.workflow.js (BEHIND-Update in Gate-Wait und
+//      Merge-Station, Konfliktabbruch) — ohne diese Gegenprobe wäre "Loch
+//      geschlossen" mit "Runner gebrochen" verwechselbar.
+test('Allowlist deckt die git-merge-Aufrufe des Runners weiterhin ab (#42)', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  const parsed = JSON.parse(tpl.replace('{{STACK_ALLOW}}', '"Bash(uv run *)"'))
+  const rules = parsed.permissions.allow
+    .filter((r) => r.startsWith('Bash(')).map((r) => r.slice(5, -1))
+  // Präfix-Semantik der Permission-Ebene nachgebaut: eine Regel mit `*` am Ende
+  // deckt jeden Befehl ab, der mit dem Text davor beginnt; eine Regel ohne `*`
+  // nur den wörtlich gleichen Befehl.
+  const covered = (cmd) => rules.some((r) => (r.endsWith('*') ? cmd.startsWith(r.slice(0, -1)) : cmd === r))
+  for (const cmd of ['git merge origin/main', 'git merge origin/develop', 'git merge --abort']) {
+    assert.ok(covered(cmd), `Allowlist deckt "${cmd}" nicht mehr ab — der Runner braucht diesen Aufruf`)
+  }
+  for (const cmd of ['git mergetool', 'git mergetool --tool=vimdiff', 'git merge-file a b c', 'git merge-tree x y', 'git difftool', 'git difftool --extcmd=id']) {
+    assert.ok(!covered(cmd), `Allowlist deckt "${cmd}" ab — dieser Unterbefehl startet ein frei konfigurierbares externes Programm und darf nicht mit freigegeben sein`)
+  }
+  assert.ok(covered('git diff --name-only --diff-filter=U'), 'Allowlist deckt den Konfliktdatei-Aufruf des Runners nicht mehr ab')
+})
+
 // ---------------------------------------------------------------------------
 // Abbruchpfade ohne Draft, Merge-Guard (Issue #35)
 // ---------------------------------------------------------------------------

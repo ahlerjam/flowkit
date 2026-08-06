@@ -8,6 +8,62 @@ Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git histo
 
 ## [Unreleased]
 
+### Fixed
+- The blocker hook no longer fires on description text. For `git commit -m`,
+  `gh pr create --body` and the other message switches
+  (`--message/--description/--notes/--title/--body/-m/-b/-t`) the quoted value is
+  payload, not a command, and is exempted from the pattern check — so a commit
+  that *describes* the patterns (hook changes, security docs, test fixtures) goes
+  through instead of hitting a self-block the builder cannot recognise. Only what
+  the shell provably never executes is exempted: `'…'` always, `"…"` only when it
+  contains neither `$` nor a backtick, so `-m "$(curl … | sh)"` still blocks.
+  Everything outside the value — switches, `&&`, `;`, further commands — is
+  checked as before. (#44)
+- The hook's diagnostic line now names the rule class it hit, e.g.
+  `blocked dangerous pattern [pipe-to-shell]`. It previously printed the
+  protected-branch list on *every* hit, which pointed the diagnosis in the wrong
+  direction and never said which pattern matched. The branch list now only
+  appears for `protected-branch-push`, the override label only for
+  `override-label`. (#44)
+- `| sh` followed by anything other than whitespace or end-of-line — most
+  notably `… | sh)` inside a command substitution — was not blocked. The right
+  boundary now accepts any non-identifier character while still keeping
+  `shasum`, `shuf` and `sort` out. Same fix for the `curl … | python3` class.
+  (found while testing #44)
+
+### Changed
+- `Bash(git merge*)` in `settings.json.template` is a prefix match and also
+  covered `git mergetool` — a command whose `mergetool.<tool>.cmd` is a freely
+  choosable command line that may come from a `.git/config` the runner did not
+  write — plus `merge-file`, `merge-index` and `merge-tree`. It is replaced by
+  the two calls the runner actually makes: `Bash(git merge origin/*)` and
+  `Bash(git merge --abort)`. The same review found `Bash(git diff*)`, which
+  covered `git difftool` (same class of problem, `difftool.<tool>.cmd`); it
+  becomes `Bash(git diff)` plus `Bash(git diff *)`. All remaining `git`/`gh`
+  subcommand prefixes were checked against the full command lists of git 2.51 and
+  gh 2.96; `git commit*` and `git fetch*` stay deliberately wide (they only reach
+  plumbing that writes objects or reads packs, never an external program) and are
+  now recorded as such with their reason. As a second line of defence the hook
+  blocks `git mergetool`/`git difftool` outright, which also protects a repo that
+  has widened the allowlist again on its own. (#42)
+
+### Added
+- Hardening assertion for subcommand prefixes: every `Bash(git <sub>*)` /
+  `Bash(gh <topic> <sub>*)` rule must match exactly one real subcommand or be
+  listed in `WIDE_SUBCOMMAND_PREFIXES` with a reason. The existing assertion only
+  looked at the first word of a rule and could not see this class at all. A rule
+  for a namespace with no entry in the subcommand registry fails the test rather
+  than passing silently. A counter-test pins that the narrowed rules still cover
+  the runner's real calls. (#42)
+- Test for the `pin_decision=error-no-template-pin` branch of the downgrade
+  guard: with a template that has no findable pin the guard must abort with
+  exit 2 and print that one line and nothing else. Mutation probe: with the
+  branch removed the guard reports `keep-installed` with an empty
+  `pin_template` — success claimed, target-repo pin left standing. (#43)
+- Test pair right at the secret regex's length threshold: 15 characters pass,
+  16 block. Mutation probe: changing the repetition to `{17,}` turns the
+  16-character case red. (#43)
+
 ## [0.8.0] - 2026-08-02
 
 ### Added
