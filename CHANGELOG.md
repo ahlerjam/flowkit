@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git history.
 
+## [Unreleased]
+
+### Fixed
+- Message text is exempt from the pattern check again — this time via a real
+  lexer instead of a regex. 0.9.0 withdrew the `sed` approach because it could
+  be turned into a bypass; the hook now tokenises the command with `python3
+  shlex`, splits it at the shell operators, and skips a value only when all
+  three hold: the segment starts with `git commit|tag` or `gh
+  pr|issue|release|gist`, the value hangs off a message switch **of that
+  program**, and it contains no shell expansion (`$…`, backtick, `<(…)`,
+  `>(…)`). That closes every bypass 0.9.0 recorded as a regression test —
+  `git commit -m "x -t 'y" ; rm -rf / ; …` now blocks, because the lexer sees
+  `rm -rf /` as its own segment. Two things fall out of it: multi-line commit
+  messages work (the `sed` version was line-based and never could), and
+  `ssh -t '<command>'` stays checked in full, since the exemption is bound to
+  the program rather than the flag.
+  Found by attacking the new code before shipping it: `git commit -m <(rm -rf /)`
+  passed a first version — process substitution *is* executed but contains
+  neither `$(` nor a backtick. Any `$` now counts as expansion, which costs
+  nothing (an unfiltered harmless message has no pattern to hit anyway).
+  Secrets are the one thing never exempted: `…TOKEN=`/`…SECRET=`/`…PASSWORD=`
+  is matched against the full text even inside a message, because a secret in a
+  PR body gets published and cannot be recalled. Rule classes carry a `full`
+  scope flag for this.
+  `python3` is already a setup prerequisite (schema validation, JSON parsing);
+  what is new is that the *hook* needs it at runtime, on every Bash call. If it
+  is missing the command is checked in full — the fail-safe degrades
+  convenience, never protection. Same for unbalanced quotes. (#44)
+
 ## [0.9.0] - 2026-08-06
 
 ### Fixed
