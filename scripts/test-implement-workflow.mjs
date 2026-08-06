@@ -140,6 +140,258 @@ const tests = []
 const test = (name, fn) => tests.push({ name, fn })
 
 // 1. Happy path: zwei Einheiten seriell, beide merged, Report konsistent.
+// ---------------------------------------------------------------------------
+// Reasoning Effort je Station (Issue #45)
+// ---------------------------------------------------------------------------
+// Bis 0.8.0 wählte der Workflow nur die MODELLSTUFE; opts.effort blieb überall
+// ungesetzt, jede Station erbte also den Effort-Wert des aufrufenden Kontexts.
+// Damit gab es keinerlei Trennung zwischen "welches Modell" und "wie viel
+// Denkaufwand" — und der Wert, den eine Station bekam, hing davon ab, wie der
+// Operator die Sitzung gestartet hatte.
+//
+// Quelle für die Belegung: platform.claude.com/docs/en/build-with-claude/effort
+// (abgerufen 2026-08-06). Zwei Punkte daraus tragen die Tests unten:
+//   - effort wird NICHT von jedem Modell unterstützt; Haiku 4.5 steht nicht auf
+//     der Liste. Die mechanischen Haiku-Stationen dürfen deshalb keinen Wert
+//     gesetzt bekommen (sie leisten ohnehin kein Reasoning über Code, sondern
+//     lesen und schreiben Zustand).
+//   - xhigh gibt es nur auf einem Teil der Modelle; ein ungültiger Wert darf
+//     nicht still durchrutschen, sondern muss den Lauf am Config-Guard stoppen.
+test('Effort: die reasoning-tragenden Stationen bekommen einen expliziten Wert (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'medium', 'Planner ohne Effort oder mit falschem Default')
+  assert.equal(only(calls, 'build #1').opts.effort, 'medium', 'Builder ohne Effort oder mit falschem Default')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, 'high', 'AC-Verifier ohne Effort')
+  // Der Security-Pass läuft nur für geschützte Bereiche — eigene Einheit dafür.
+  const sec = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'] }),
+  })
+  assert.equal(only(sec.calls, 'security #2').opts.effort, 'high', 'Security-Pass ohne Effort')
+})
+
+test('Effort: Größe L hebt Planner und Builder eine Stufe an (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1, { size: 'L' })], config: cfg() })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'high')
+  assert.equal(only(calls, 'build #1').opts.effort, 'high')
+})
+
+// Die Station-Karte allein reicht als Kriterium NICHT: ob effort gesetzt werden
+// darf, hängt am effektiv gewählten MODELL, nicht am Stationsnamen. Ein Repo,
+// das planner oder verifier bewusst auf haiku stellt (kleine, mechanische
+// Issues), bekäme sonst einen Parameter, den das Modell nicht kennt.
+test('Effort: eine auf haiku KONFIGURIERTE Station bekommt ebenfalls keinen Wert (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ models: { planner: { SM: 'haiku', L: 'haiku' }, builder: { SM: 'sonnet', L: 'opus' }, verifier: 'haiku' } }),
+  })
+  assert.equal(only(calls, 'plan #1').opts.model, 'haiku', 'Modellkarte greift nicht — der Test prüft ins Leere')
+  assert.equal(only(calls, 'plan #1').opts.effort, undefined,
+    'Planner läuft auf haiku, bekommt aber einen effort-Wert — das Kriterium hängt am Stationsnamen statt am Modell')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, undefined,
+    'AC-Verifier läuft auf haiku, bekommt aber einen effort-Wert')
+  // Gegenprobe: der Builder steht weiter auf sonnet und behält seinen Wert.
+  assert.equal(only(calls, 'build #1').opts.effort, 'medium')
+})
+
+// Das Security-Modell kam bisher aus einem zweiten, direkt an den Aufrufen
+// eingebauten Ausdruck (M.verifier || 'sonnet') statt aus modelFor. Damit gab
+// es zwei Quellen für dieselbe Entscheidung — und die Effort-Wahl konnte gegen
+// die Modell-Wahl laufen.
+test('Effort/Modell: der Security-Pass folgt derselben Karte wie der Verifier (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'], models: { verifier: 'haiku' } }),
+  })
+  const sec = only(calls, 'security #2')
+  assert.equal(sec.opts.model, 'haiku', 'Security-Pass folgt models.verifier nicht mehr')
+  assert.equal(sec.opts.effort, undefined, 'Security-Pass läuft auf haiku, bekommt aber einen effort-Wert')
+})
+
+test('Effort: mechanische Haiku-Stationen bekommen KEINEN Wert (#45)', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  // Haiku steht nicht auf der Liste der effort-fähigen Modelle; ein gesetzter
+  // Wert wäre je nach Engine ein Fehler oder stiller Ballast.
+  for (const c of calls.filter((x) => x.opts.model === 'haiku')) {
+    assert.equal(c.opts.effort, undefined,
+      `Station "${c.label}" läuft auf haiku und darf keinen effort-Wert bekommen (Modell unterstützt den Parameter nicht)`)
+  }
+  assert.ok(calls.some((c) => c.opts.model === 'haiku'), 'kein einziger haiku-Aufruf im Lauf — der Test prüft ins Leere')
+})
+
+// Die Eskalation hebt bisher NUR die Modellstufe (NEXT_TIER). Effort muss
+// orthogonal dazu laufen: eine eskalierte Fix-Runde bekommt beides, und die
+// Modell-Eskalation selbst bleibt unverändert — sonst wäre die eine Änderung
+// eine stille Verschiebung der anderen.
+test('Effort: Eskalation hebt Modell UND Effort, ohne die Modellkarte zu verändern (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3 }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix1 = only(calls, 'fix1 #1')
+  assert.equal(fix1.opts.model, 'sonnet', 'Runde 1 eskaliert noch nicht — Modellkarte hat sich verändert')
+  assert.equal(fix1.opts.effort, 'medium', 'Runde 1 ohne Eskalation fährt den Builder-Effort')
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'opus', 'Modell-Eskalation (NEXT_TIER) ist nicht mehr wirksam')
+  assert.equal(fix2.opts.effort, 'xhigh', 'Effort-Eskalation greift bei der eskalierten Runde nicht')
+})
+
+test('Effort: Repo-Config überschreibt die Voreinstellung (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ effort: { planner: { SM: 'low', L: 'low' }, builder: { SM: 'max', L: 'max' }, verifier: 'low', security: 'medium', escalation: 'max' } }),
+  })
+  assert.equal(only(calls, 'plan #1').opts.effort, 'low')
+  assert.equal(only(calls, 'build #1').opts.effort, 'max')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, 'low')
+  const sec = await runWorkflow({
+    units: [unit(2, { area: 'security' })],
+    config: cfg({ protectedAreas: ['security'], areas: ['security'], effort: { security: 'medium' } }),
+  })
+  assert.equal(only(sec.calls, 'security #2').opts.effort, 'medium')
+})
+
+// models.* ist im Schema ein freier String — ein Repo darf statt des Alias
+// 'haiku' auch den vollen Modellnamen eintragen. Ein Exact-Match gegen 'haiku'
+// greift dort nicht und schickt einen Parameter an ein Modell, das ihn nicht
+// kennt.
+test('Effort: auch ein VOLLER haiku-Modellname bekommt keinen Wert (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ models: { verifier: 'claude-haiku-4-5' } }),
+  })
+  assert.equal(only(calls, 'ac-verify #1').opts.model, 'claude-haiku-4-5', 'Modellkarte greift nicht — der Test prüft ins Leere')
+  assert.equal(only(calls, 'ac-verify #1').opts.effort, undefined,
+    'voller haiku-Modellname umgeht die Fähigkeitsprüfung — sie vergleicht auf Gleichheit statt auf Enthaltensein')
+})
+
+// Die Fähigkeit ist NICHT monoton: Sonnet 4.6 und Opus 4.6 unterstützen `max`,
+// aber nicht `xhigh` (Quelle: die Effort-Doku, "xhigh is a newer level; some
+// models that support max don't support xhigh"). Ein Wunschwert, den das
+// gewählte Modell nicht kennt, darf weder an die Engine gehen noch den Lauf
+// abbrechen — er fällt auf den höchsten unterstützten Wert DARUNTER zurück.
+test('Effort: ein Modell ohne xhigh bekommt den höchsten unterstützten Wert darunter (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3, models: { escalation: 'claude-sonnet-4-6' } }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'claude-sonnet-4-6', 'Eskalations-Modell greift nicht — der Test prüft ins Leere')
+  assert.equal(fix2.opts.effort, 'high',
+    'xhigh geht an ein Modell, das den Wert nicht kennt (Sonnet 4.6 kann max, aber kein xhigh) — erwartet ist der Rückfall auf high')
+})
+
+// Gegenprobe zur Fähigkeitskarte: der Alias 'sonnet' zeigt auf Sonnet 5, und
+// das KANN xhigh. Ohne diesen Fall würde ein pauschaler Sonnet-Ausschluss
+// unbemerkt durchgehen und jede Eskalation still herunterstufen.
+test('Effort: der Alias sonnet unterstützt xhigh und wird NICHT heruntergestuft (#45)', async () => {
+  const { calls } = await runWorkflow({
+    units: [unit(1)],
+    config: cfg({ maxFixRounds: 3, models: { builder: { SM: 'haiku', L: 'haiku' } } }),
+    respond: (c) => (/^ac-verify(\+\d+)? #1$/.test(c.label) ? { pass: false, unmet: ['AC offen'] } : undefined),
+  })
+  const fix2 = only(calls, 'fix2 #1 esc')
+  assert.equal(fix2.opts.model, 'sonnet', 'Eskalation von haiku landet laut NEXT_TIER auf sonnet')
+  assert.equal(fix2.opts.effort, 'xhigh', 'sonnet (= Sonnet 5) kann xhigh — hier darf nichts heruntergestuft werden')
+})
+
+// Object.assign({}, {SM,L}, 'low') ergibt {SM,L,0:'l',1:'o',2:'w'} — SM und L
+// bleiben gültig, der Guard schöpft keinen Verdacht, und der Operator hält
+// eine wirkungslose Einstellung für wirksam.
+test('Effort: eine Stationskarte als String stoppt den Lauf, statt still zu verpuffen (#45)', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { builder: 'low' } }) }),
+    /effort\.builder/i,
+    'effort.builder als String wird von Object.assign verschluckt — der Lauf fährt weiter auf der Voreinstellung, ohne das zu sagen')
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { planner: ['low'] } }) }),
+    /effort\.planner/i)
+})
+
+test('Effort: ungültiger Wert stoppt den Lauf am Guard, statt still zu greifen (#45)', async () => {
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { verifier: 'sehr hoch' } }) }),
+    /effort/i,
+    'ein Tippfehler im effort-Wert muss den Lauf stoppen — sonst schickt er still einen ungültigen Parameter an die Engine')
+  // "adaptive" ist ein THINKING-Modus, kein Effort-Level; die Verwechslung ist
+  // in der Anthropic-Doku eigens erwähnt und gehört deshalb festgeschrieben.
+  await assert.rejects(
+    () => runWorkflow({ units: [unit(1)], config: cfg({ effort: { builder: { SM: 'adaptive', L: 'high' } } }) }),
+    /effort/i)
+})
+
+// Bestehende Repos bekommen neue Config-Keys NUR über
+// templates/config-migrations.json — /flowkit:setup arbeitet die Liste beim
+// Update ab. Ein Key, der nur im Template steht, erreicht sie nie: er greift
+// zwar über die eingebaute Voreinstellung, taucht aber in ihrer Config nicht
+// auf und ist für den Operator damit unsichtbar und nicht anpassbar. Genau das
+// war beim ersten Anlauf von #45 passiert.
+//
+// CONFIG_BASELINE sind die Keys aus der Zeit vor dem Migrationsmechanismus
+// (< 0.3.0). Alles, was danach dazukam, gehört in die Migrationsliste — ein
+// neuer Key lässt diesen Test failen, bis er dort steht.
+const CONFIG_BASELINE = new Set([
+  'repoSlug', 'defaultBranch', 'pushCommand', 'commands', 'extraGates',
+  'protectedAreas', 'areas', 'parallelism', 'caps', 'budgets', 'opusTurnWeight',
+  'models', 'autoReady', 'maxFixRounds', 'mergeCheck', 'overrideLabel',
+  'markers', 'milestoneExcludeRegex', 'excludeLabels', 'issueLimit',
+  'browserProof', 'notify', 'onSmokeFailure',
+])
+test('Config-Migrationen: jeder Template-Key ist entweder Baseline oder migriert', async () => {
+  const tpl = JSON.parse(readFileSync(new URL('../templates/workflow.config.json.template', import.meta.url), 'utf8'))
+  const migrations = JSON.parse(readFileSync(new URL('../templates/config-migrations.json', import.meta.url), 'utf8'))
+  // Migrationen adressieren teils verschachtelte Felder ("commands.setup") —
+  // für den Abgleich zählt das Top-Level-Segment.
+  const migrated = new Set(migrations.map((m) => String(m.field).split('.')[0]))
+  for (const key of Object.keys(tpl)) {
+    assert.ok(CONFIG_BASELINE.has(key) || migrated.has(key),
+      `Config-Key "${key}" steht im Template, aber weder in CONFIG_BASELINE noch in config-migrations.json — bestehende Repos bekämen ihn beim Update nie zu sehen. Eintrag in templates/config-migrations.json ergänzen (version, field, default, note).`)
+  }
+  // Gegenrichtung: eine Migration, deren Feld es im Template gar nicht gibt,
+  // schickt den Operator einem Key hinterher, den der Workflow nicht liest.
+  for (const m of migrations) {
+    const top = String(m.field).split('.')[0]
+    assert.ok(Object.prototype.hasOwnProperty.call(tpl, top),
+      `config-migrations.json migriert "${m.field}", aber das Template kennt "${top}" nicht (mehr) — Migration entfernen oder Template ergänzen.`)
+    assert.ok(m.version && m.note, `Migration für "${m.field}" ohne version oder note`)
+  }
+})
+
+// /flowkit:setup liest die Plugin-Version aus plugin.json und schreibt sie als
+// Stempel nach .claude/flowkit-version und in jeden installierten Hook; im
+// selben Lauf wendet es die Migrationen an und meldet sie mit IHRER Version.
+// Deklariert eine Migration eine Version, die das Plugin noch gar nicht hat,
+// bekommt das Zielrepo den älteren Stempel bei bereits angewandter neuerer
+// Migration — die SessionStart-Drift-Prüfung vergleicht dann gegen einen
+// Stand, den das Repo schon hat, und fordert nie zum Re-Setup auf. Der
+// 0.8.0-Release hat den Bump deshalb im selben Commit wie seine Migrationen
+// mitgeführt (bdec8e6).
+test('Config-Migrationen: keine Migration ist neuer als die Plugin-Version', async () => {
+  const migrations = JSON.parse(readFileSync(new URL('../templates/config-migrations.json', import.meta.url), 'utf8'))
+  const plugin = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'))
+  const num = (v) => String(v).split('.').map(Number)
+  const newer = (a, b) => {
+    const [x, y] = [num(a), num(b)]
+    for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0)
+    return false
+  }
+  for (const m of migrations) {
+    assert.ok(!newer(m.version, plugin.version),
+      `Migration für "${m.field}" deklariert ${m.version}, plugin.json steht auf ${plugin.version} — der Versionsstempel im Zielrepo wäre älter als die angewandte Migration. Plugin-Version mitziehen (und den CHANGELOG-Abschnitt aus [Unreleased] herausschneiden).`)
+  }
+})
+
+test('Effort: Template und Schema liefern die Sektion aus (#45)', async () => {
+  const tpl = JSON.parse(readFileSync(new URL('../templates/workflow.config.json.template', import.meta.url), 'utf8'))
+  assert.ok(tpl.effort, 'workflow.config.json.template hat keine effort-Sektion — neue Repos bekämen sie nie zu sehen')
+  assert.equal(tpl.effort.verifier, 'high')
+  assert.ok(tpl.effort.planner && tpl.effort.builder, 'planner/builder fehlen in der Template-Sektion')
+  const schema = JSON.parse(readFileSync(new URL('../templates/workflow.config.schema.json', import.meta.url), 'utf8'))
+  assert.ok(schema.properties.effort, 'workflow.config.schema.json kennt effort nicht — eine gesetzte Sektion wäre schema-widrig')
+})
+
 test('Happy path: 2 Einheiten, parallelism 1 — beide merged, done korrekt', async () => {
   const { report, calls } = await runWorkflow({ units: [unit(1), unit(2)], config: cfg() })
   assert.equal(report.stopped, null)
@@ -1586,6 +1838,108 @@ test('Allowlist-Härte: keine Präfix-Regel ohne Wortgrenze, awk nur wörtlich',
   assert.ok(awkCall, 'der malformed-tree-Check im gate-merge-Prompt ruft kein awk mehr auf')
   assert.ok(tpl.includes(`"Bash(${awkCall})"`),
     `settings.json.template deckt den einzigen awk-Aufruf des Prompts (${awkCall}) nicht wörtlich ab`)
+})
+
+// 35c. Die Härte-Prüfung aus 35b greift nur beim ERSTEN Wort einer Regel: in
+//      `Bash(git merge*)` steht vor dem `*` ein Leerzeichen-getrenntes zweites
+//      Wort, der Regex `^[^\s]*[^\s*]\*` findet dort nichts. Genau dort saß
+//      Issue #42: der Stern klebt am UNTERBEFEHL statt hinter einer Wortgrenze,
+//      und `git merge*` deckt damit auch `git mergetool` ab — ein Kommando, das
+//      über `mergetool.<tool>.cmd` eine frei wählbare Kommandozeile startet, die
+//      aus einer `.git/config` stammen kann, die der Runner nicht geschrieben
+//      hat. `git difftool` (aus `git diff*`) ist derselbe Fall.
+//
+//      Geprüft wird deshalb je Regel der Form `<prog> [<topic> ]<sub>*`, wie
+//      viele ECHTE Unterbefehle mit `<sub>` beginnen. Mehr als einer heißt: die
+//      Regel gibt mehr frei als ihr Name sagt, und sie muss ausdrücklich als
+//      bewusst weit markiert sein (WIDE_SUBCOMMAND_PREFIXES, mit Begründung).
+//
+//      Das Register ist bewusst statisch statt aus `git --list-cmds` / `gh --help`
+//      erhoben: der Test soll auf jedem Runner dasselbe Ergebnis liefern und
+//      nicht davon abhängen, welche git-Version oder welche gh-Extensions dort
+//      zufällig installiert sind. Preis dafür ist Pflege — deshalb lässt eine
+//      Regel für einen Namensraum OHNE Registereintrag den Test failen, statt
+//      still durchzulaufen.
+const SUBCOMMAND_REGISTRY = {
+  // git 2.51 (`git --list-cmds=main,others,nohelpers`), erhoben 2026-08-06.
+  git: 'add am annotate apply archimport archive backfill bisect blame branch bugreport bundle cat-file check-attr check-ignore check-mailmap check-ref-format checkout checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree config count-objects credential credential-cache credential-netrc credential-osxkeychain credential-store cvsexportcommit cvsimport cvsserver daemon describe diagnose diff diff-files diff-index diff-pairs diff-tree difftool fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck fsck-objects gc get-tar-commit-id grep hash-object help hook http-backend http-fetch http-push imap-send index-pack init init-db instaweb interpret-trailers jump last-modified log ls-files ls-remote ls-tree mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-octopus merge-one-file merge-ours merge-recursive merge-recursive-ours merge-recursive-theirs merge-resolve merge-subtree merge-tree mergetool mktag mktree multi-pack-index mv name-rev notes p4 pack-objects pack-redundant pack-refs patch-id pickaxe prune prune-packed pull push quiltimport range-diff read-tree rebase receive-pack reflog refs remote remote-ext remote-fd remote-ftp remote-ftps remote-http remote-https repack replace replay repo request-pull rerere reset restore rev-list rev-parse revert rm send-email send-pack shell shortlog show show-branch show-index show-ref sparse-checkout stage stash status stripspace submodule subtree switch symbolic-ref tag unpack-file unpack-objects update-index update-ref update-server-info upload-archive upload-pack var verify-commit verify-pack verify-tag version whatchanged worktree write-tree',
+  // gh 2.96.0 (`gh --help`), erhoben 2026-08-06, plus die beiden Extensions,
+  // die das Template selbst freigibt (gh-milestone, gh-sub-issue) — ohne sie
+  // stünden deren Regeln ohne Registereintrag da.
+  gh: 'accessibility actions alias api attestation auth browse cache codespace completion config extension gist gpg-key issue label milestone org pr preview project release repo ruleset run search secret ssh-key status sub-issue variable workflow',
+  // gh 2.96.0, je `gh <topic> --help`, erhoben 2026-08-06.
+  'gh issue': 'close comment create delete develop edit list lock pin reopen status transfer unlock unpin view',
+  'gh pr': 'checkout checks close comment create diff edit list lock merge ready reopen revert review status unlock update-branch view',
+  'gh run': 'cancel delete download list rerun view watch',
+  'gh label': 'clone create delete edit list',
+  // gh-milestone v2.2.0 / gh-sub-issue v0.5.1, je `--help`, erhoben 2026-08-06.
+  'gh milestone': 'completion create delete edit help list view',
+  'gh sub-issue': 'add completion create help list remove',
+}
+// Regel → Begründung, warum die Präfix-Kollision hier tragbar ist. Ein Eintrag
+// ohne passende Regel im Template ist ebenfalls ein FAIL: eine Ausnahmeliste,
+// die alte Zusagen konserviert, verliert ihre Aussagekraft.
+const WIDE_SUBCOMMAND_PREFIXES = {
+  'git commit': 'zusätzlich getroffen: commit-graph, commit-tree — beide Plumbing, die nur Objekte in .git schreiben und kein externes Programm starten; `git commit --no-verify` fängt zusätzlich der PreToolUse-Hook',
+  'git fetch': 'zusätzlich getroffen: fetch-pack — read-only Transport-Plumbing ohne Schreibzugriff auf das Arbeitsverzeichnis',
+}
+test('Allowlist-Härte: Unterbefehls-Präfixe treffen genau einen Unterbefehl (#42)', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  const parsed = JSON.parse(tpl.replace('{{STACK_ALLOW}}', '"Bash(uv run *)"'))
+  const rules = parsed.permissions.allow
+    .filter((r) => r.startsWith('Bash(')).map((r) => r.slice(5, -1))
+  const seenWide = new Set()
+  for (const r of rules) {
+    // Nur Regeln, deren LETZTES Wort ein reiner Bezeichner mit anklebendem `*`
+    // ist — `Bash(gh api repos/*/branches/*/protection)` endet auf einen
+    // Pfadausdruck ohne Stern und fällt nicht in diese Klasse.
+    const m = r.match(/^([a-z][a-z0-9-]*)(?: ([a-z][a-z0-9-]*))? ([a-z][a-z0-9-]*)\*$/)
+    if (!m) continue
+    const [, prog, topic, sub] = m
+    if (prog !== 'git' && prog !== 'gh') continue
+    const ns = topic ? `${prog} ${topic}` : prog
+    const known = SUBCOMMAND_REGISTRY[ns]
+    assert.ok(known,
+      `Allow-Regel "Bash(${r})" betrifft den Namensraum "${ns}", für den SUBCOMMAND_REGISTRY keine Unterbefehlsliste hat — ohne Liste prüft diese Assertion ins Leere. Liste ergänzen (Quelle und Erhebungsdatum im Kommentar vermerken).`)
+    const hits = known.split(' ').filter((c) => c.startsWith(sub))
+    const key = `${ns} ${sub}`
+    if (hits.length > 1) seenWide.add(key)
+    assert.ok(hits.length === 1 || key in WIDE_SUBCOMMAND_PREFIXES,
+      `Allow-Regel "Bash(${r})" ist ein Präfix-Match und trifft ${hits.length} Unterbefehle statt einen: ${hits.join(', ')}. Entweder die Regel auf den gemeinten Aufruf eingrenzen (z. B. "${ns} ${sub} <argumentpräfix>*" oder die wörtliche Form) oder sie in WIDE_SUBCOMMAND_PREFIXES mit Begründung eintragen.`)
+  }
+  for (const key of Object.keys(WIDE_SUBCOMMAND_PREFIXES)) {
+    assert.ok(seenWide.has(key),
+      `WIDE_SUBCOMMAND_PREFIXES führt "${key}" als bewusst weit, aber im Template gibt es keine kollidierende Regel dieser Form mehr — Eintrag entfernen, sonst deckt die Ausnahmeliste Regeln ab, die es nicht gibt.`)
+  }
+})
+
+// 35d. Gegenrichtung zu 35c: die Eingrenzung darf dem Runner nicht die
+//      Kommandos wegnehmen, die er wirklich fährt. Die Liste unten stammt aus
+//      workflows/implement.workflow.js (BEHIND-Update in Gate-Wait und
+//      Merge-Station, Konfliktabbruch) — ohne diese Gegenprobe wäre "Loch
+//      geschlossen" mit "Runner gebrochen" verwechselbar.
+test('Allowlist deckt die git-merge-Aufrufe des Runners weiterhin ab (#42)', async () => {
+  const tpl = readFileSync(new URL('../templates/settings.json.template', import.meta.url), 'utf8')
+  const parsed = JSON.parse(tpl.replace('{{STACK_ALLOW}}', '"Bash(uv run *)"'))
+  const rules = parsed.permissions.allow
+    .filter((r) => r.startsWith('Bash(')).map((r) => r.slice(5, -1))
+  // Präfix-Semantik der Permission-Ebene nachgebaut: eine Regel mit `*` am Ende
+  // deckt jeden Befehl ab, der mit dem Text davor beginnt; eine Regel ohne `*`
+  // nur den wörtlich gleichen Befehl.
+  const covered = (cmd) => rules.some((r) => (r.endsWith('*') ? cmd.startsWith(r.slice(0, -1)) : cmd === r))
+  // `git merge --continue` gehört dazu: der Prompt der Merge- und der
+  // Gate-Wait-Station erlaubt genau EINE Konfliktauflösung (reiner
+  // Append-Konflikt) und weist an, den Merge danach zu committen. Fehlt der
+  // Aufruf in der Allowlist, hängt der unbeaufsichtigte Lauf an dieser Stelle
+  // an einem Permission-Prompt, den niemand beantwortet — und zwar auf dem
+  // einen Pfad, den wir als auflösbar deklariert haben.
+  for (const cmd of ['git merge origin/main', 'git merge origin/develop', 'git merge --abort', 'git merge --continue']) {
+    assert.ok(covered(cmd), `Allowlist deckt "${cmd}" nicht mehr ab — der Runner braucht diesen Aufruf`)
+  }
+  for (const cmd of ['git mergetool', 'git mergetool --tool=vimdiff', 'git merge-file a b c', 'git merge-tree x y', 'git difftool', 'git difftool --extcmd=id']) {
+    assert.ok(!covered(cmd), `Allowlist deckt "${cmd}" ab — dieser Unterbefehl startet ein frei konfigurierbares externes Programm und darf nicht mit freigegeben sein`)
+  }
+  assert.ok(covered('git diff --name-only --diff-filter=U'), 'Allowlist deckt den Konfliktdatei-Aufruf des Runners nicht mehr ab')
 })
 
 // ---------------------------------------------------------------------------

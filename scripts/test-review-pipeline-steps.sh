@@ -531,6 +531,33 @@ else
     check_guard "gleich"       "$WORK/wf-gleich.yml"    template
     check_guard "neuer"        "$WORK/wf-neuer.yml"     keep-installed "$GUARD_NEW_SHA"
 
+    # Fehlerpfad: im TEMPLATE ist gar kein Pin auffindbar (kaputter Plugin-Stand,
+    # missglückte Template-Bearbeitung). Genau hier wäre der Guard gefährlich,
+    # wenn er ratend weiterliefe: als "Template-Pin ist älter" gedeutet ließe er
+    # den Zielrepo-Pin stehen und meldete Erfolg, als "Zielrepo-Pin fehlt"
+    # schriebe er einen leeren Wert. Festgeschrieben wird deshalb BEIDES —
+    # Abbruch mit Exit 2 UND die Abwesenheit jeder Entscheidungszeile, an der
+    # Schritt 6 weiterarbeiten könnte (Issue #43, Punkt 1).
+    BROKEN_TPL="$WORK/tpl-ohne-pin.yml"
+    printf '      - uses: anthropics/claude-code-action@v1\n      - uses: actions/checkout@v5\n' > "$BROKEN_TPL"
+    guard_out="$(PIN_TEMPLATE="$BROKEN_TPL" PIN_INSTALLED="$WORK/wf-neuer.yml" bash "$GUARD" 2>/dev/null)"
+    guard_rc=$?
+    if [ "$guard_rc" != "2" ]; then
+      ko "(f-kein-template-pin) erwartet Exit 2 (abbrechen), bekam rc=$guard_rc (Ausgabe: $(printf '%s' "$guard_out" | tr '\n' ' '))"
+    elif [ "$guard_out" != "pin_decision=error-no-template-pin" ]; then
+      ko "(f-kein-template-pin) erwartet genau die Zeile pin_decision=error-no-template-pin, bekam: $(printf '%s' "$guard_out" | tr '\n' ' ') — jede weitere Zeile wäre eine geratene Entscheidung"
+    else
+      ok
+    fi
+    # Gegenprobe zum Marker: dass das Template im Normalfall einen Pin HAT,
+    # deckt check_guard oben ab — hier wird nur sichergestellt, dass der
+    # Fehlerpfad nicht schon an der fehlenden Datei scheitert und deshalb
+    # "zufällig" richtig aussieht.
+    guard_out2="$(PIN_TEMPLATE="$WORK/gibt-es-nicht-tpl.yml" PIN_INSTALLED="$WORK/wf-neuer.yml" bash "$GUARD" 2>/dev/null)"
+    guard_rc2=$?
+    if [ "$guard_rc2" = "2" ] && [ "$guard_out2" = "pin_decision=error-no-template-pin" ]; then ok
+    else ko "(f-template-fehlt) fehlendes Template muss denselben Abbruch liefern wie ein Template ohne Pin, bekam rc=$guard_rc2 / $(printf '%s' "$guard_out2" | tr '\n' ' ')"; fi
+
     # Reparatur (Teil 2): nicht nur die ENTSCHEIDUNG prüfen, sondern dass der
     # Rückschreib-sed die installierte Datei tatsächlich auf den "neuer"-Pin
     # zurücksetzt — genau das Schutzziel, das eine reine Entscheidungsprüfung

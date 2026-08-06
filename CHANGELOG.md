@@ -6,7 +6,135 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git history.
 
-## [Unreleased]
+## [0.9.0] - 2026-08-06
+
+### Fixed
+- Effort is decided by the station's *effective model*, not by its name. A repo
+  that puts `models.planner` or `models.verifier` on haiku was getting an
+  `effort` value on a model that does not support the parameter. The security
+  pass also picked its model from a second expression inlined at the call sites
+  (`M.verifier || 'sonnet'`) instead of from `modelFor`, so the model and effort
+  decisions could drift apart; `modelFor` now covers it and is the single
+  source. (#45)
+- The hook checks the whole command line again, message text included. An
+  earlier attempt at #44 exempted the quoted value behind `-m`/`--body`/`--title`
+  via `sed` so that a commit *describing* the patterns would not self-block. That
+  is withdrawn: `sed` has no shell-quoting context, so the exemption could be
+  turned into a bypass. `git commit -m "x -t 'y" ; rm -rf / ; echo "z'"` passed
+  the hook — the pattern matched the bait switch inside the double-quoted value
+  and elided across the command separator, hiding a `rm -rf /` the shell really
+  runs. The same held for `gh pr create --body "… -t 'x" ; git push --force
+  origin main ; …`, for `"… '$(…)' …"` (the shell expands it, the first pass
+  removed it), for a secret assignment placed in a PR body, and for `ssh -t
+  '<command>'` since the rule keyed on the flag rather than the program. A filter
+  that can be disarmed with its own switch is worse than none, because it looks
+  like protection. The bypasses are now regression tests so the approach cannot
+  return unnoticed. #44 stays open; a correct exemption needs a real shell lexer
+  bound to the invoking program. Workaround meanwhile: `git commit -F <file>`.
+  (#44, reverted after code review)
+- Effort is resolved against a model *capability map*, not a single "does this
+  model support the parameter" flag. The capability is not monotonic — Sonnet 4.6
+  and Opus 4.6 support `max` but not `xhigh`, Sonnet 5 supports both — so an
+  upper bound would have been the wrong structure. An unsupported level now falls
+  back to the highest supported level below it instead of going to the engine
+  unchecked: an escalation onto Sonnet 4.6 sends `high`. The check also matches by
+  containment rather than equality, so a repo that writes the full model name
+  (`claude-haiku-4-5`) instead of the alias is covered too. Unknown names keep all
+  levels — a name the map does not know is usually a newer model. (#45, from code
+  review)
+- `effort.planner`/`effort.builder` written as a plain string instead of an
+  `{SM, L}` map now stops the run. `Object.assign({}, {SM, L}, "low")` yields
+  `{SM, L, 0:"l", 1:"o", 2:"w"}` — both required keys survive with valid values,
+  so the value check saw nothing wrong and the run silently continued on the
+  default while the operator believed the setting had taken effect. (#45, from
+  code review)
+- `Bash(git merge --continue)` is back in the allowlist. Narrowing `git merge*`
+  dropped it, but the merge and gate-wait prompts allow exactly one conflict
+  resolution (pure append conflicts) and instruct the station to commit the
+  merge — without the rule an unattended run stalls on a permission prompt on the
+  one path we declared resolvable. (#42, from code review)
+- The hook's diagnostic line now names the rule class it hit, e.g.
+  `blocked dangerous pattern [pipe-to-shell]`. It previously printed the
+  protected-branch list on *every* hit, which pointed the diagnosis in the wrong
+  direction and never said which pattern matched. The branch list now only
+  appears for `protected-branch-push`, the override label only for
+  `override-label`. (#44)
+- `| sh` followed by anything other than whitespace or end-of-line — most
+  notably `… | sh)` inside a command substitution — was not blocked. The right
+  boundary now accepts any non-identifier character while still keeping
+  `shasum`, `shuf` and `sort` out. Same fix for the `curl … | python3` class.
+  (found while testing #44)
+
+### Changed
+- `Bash(git merge*)` in `settings.json.template` is a prefix match and also
+  covered `git mergetool` — a command whose `mergetool.<tool>.cmd` is a freely
+  choosable command line that may come from a `.git/config` the runner did not
+  write — plus `merge-file`, `merge-index` and `merge-tree`. It is replaced by
+  the two calls the runner actually makes: `Bash(git merge origin/*)` and
+  `Bash(git merge --abort)`. The same review found `Bash(git diff*)`, which
+  covered `git difftool` (same class of problem, `difftool.<tool>.cmd`); it
+  becomes `Bash(git diff)` plus `Bash(git diff *)`. All remaining `git`/`gh`
+  subcommand prefixes were checked against the full command lists of git 2.51 and
+  gh 2.96; `git commit*` and `git fetch*` stay deliberately wide (they only reach
+  plumbing that writes objects or reads packs, never an external program) and are
+  now recorded as such with their reason. As a second line of defence the hook
+  blocks `git mergetool`/`git difftool` outright, which also protects a repo that
+  has widened the allowlist again on its own. (#42)
+
+### Added
+- `effort` config section: reasoning effort is now set per station instead of
+  every station inheriting whatever effort the calling session happened to run
+  at. `models` picks *which* model, `effort` picks *how much work it puts in*;
+  the two are separate maps and the escalation after a failed fix round raises
+  both from `models.escalation` and `effort.escalation`, so neither silently
+  moves the other. Defaults: planner `medium`/`high` (S/M vs L), builder
+  `medium`/`high`, ac-verify `high`, security `high`, escalation `xhigh`; the
+  mechanical Haiku stations get no value at all, because Haiku does not support
+  the parameter. Invalid values (including `adaptive`, which is a *thinking*
+  mode, not an effort level) stop the run at the config guard rather than being
+  passed through. Rationale and the availability caveat for `xhigh` are in the
+  README. (#45)
+
+  Research basis: `platform.claude.com/docs/en/build-with-claude/effort`,
+  retrieved 2026-08-06. Three findings shaped the defaults. Effort affects
+  *all* tokens including tool calls, so per station the question is how broadly
+  it may work, not how clever it should be. `xhigh` is the level Anthropic
+  names as the starting point for coding and agentic work — which here is
+  exactly one station, the builder; the default deliberately sits one step
+  below it, because the same source calls `low`/`medium` the primary control
+  for token cost and latency "wherever your evals show quality holds". That is
+  a cost decision to re-check against real runs, not a correction of the
+  guidance. And the issue's suspicion that more effort is not monotonically
+  better checks out, but not where it was expected: the documented overthinking
+  risk sits at `max` ("adds significant cost for relatively small quality
+  gains… can lead to overthinking"), not between `medium` and `high` — so `max`
+  appears nowhere in the defaults, and no station was lowered on that theory.
+- Config-migration coverage assertion: every top-level key in
+  `workflow.config.json.template` must be either in the pre-0.3.0 baseline or
+  in `config-migrations.json`, and every migration must point at a key the
+  template still has. Existing repos only ever receive new config keys through
+  that list, so a key added to the template alone works via the built-in
+  default but stays invisible and unadjustable in the operator's own config —
+  which is exactly what happened to `effort` on the first pass.
+- Rule-class completeness probe in `test-pretooluse-blocker.sh`, mirroring the
+  existing one for the secret alternation: every `rule` class in the hook needs
+  a `must_block_as` case, so the rule list can't grow without its diagnostic
+  ever being checked.
+- Hardening assertion for subcommand prefixes: every `Bash(git <sub>*)` /
+  `Bash(gh <topic> <sub>*)` rule must match exactly one real subcommand or be
+  listed in `WIDE_SUBCOMMAND_PREFIXES` with a reason. The existing assertion only
+  looked at the first word of a rule and could not see this class at all. A rule
+  for a namespace with no entry in the subcommand registry fails the test rather
+  than passing silently. A counter-test pins that the narrowed rules still cover
+  the runner's real calls. (#42)
+- Test for the `pin_decision=error-no-template-pin` branch of the downgrade
+  guard: with a template that has no findable pin the guard must abort with
+  exit 2 and print that one line and nothing else. Mutation probe: with the
+  branch removed the guard reports `keep-installed` with an empty
+  `pin_template` — success claimed, target-repo pin left standing. (#43)
+- Test pair right at the secret regex's length threshold: 15 characters pass,
+  16 block. Mutation probe: changing the repetition to `{17,}` turns the
+  16-character case red. (#43)
 
 ## [0.8.0] - 2026-08-02
 

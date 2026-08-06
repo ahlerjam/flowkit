@@ -170,6 +170,29 @@
         }
       }
     },
+    "effort": {
+      "type": "object",
+      "description": "Reasoning Effort je Station, unabhaengig von der Modellstufe. Weggelassen erbt jede Station den Effort des aufrufenden Kontexts. ACHTUNG: xhigh wird nicht von jedem Modell unterstuetzt (u. a. nicht von Sonnet 4.6), und Haiku unterstuetzt den Parameter gar nicht - die mechanischen Stationen bekommen deshalb grundsaetzlich keinen Wert. Wer models umstellt, prueft effort mit.",
+      "properties": {
+        "planner": {
+          "type": "object",
+          "properties": {
+            "SM": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+            "L": { "enum": ["low", "medium", "high", "xhigh", "max"] }
+          }
+        },
+        "builder": {
+          "type": "object",
+          "properties": {
+            "SM": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+            "L": { "enum": ["low", "medium", "high", "xhigh", "max"] }
+          }
+        },
+        "verifier": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+        "security": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+        "escalation": { "enum": ["low", "medium", "high", "xhigh", "max"] }
+      }
+    },
     "autoReady": {
       "type": "object",
       "required": [

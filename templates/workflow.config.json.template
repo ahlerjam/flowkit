@@ -63,6 +63,19 @@
     "verifier": "sonnet",
     "escalation": "opus"
   },
+  "effort": {
+    "planner": {
+      "SM": "medium",
+      "L": "high"
+    },
+    "builder": {
+      "SM": "medium",
+      "L": "high"
+    },
+    "verifier": "high",
+    "security": "high",
+    "escalation": "xhigh"
+  },
   "autoReady": {
     "impulse": "P2",
     "gapScan": "off"
