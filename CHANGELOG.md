@@ -6,9 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git history.
 
-## [Unreleased]
+## [0.9.1] - 2026-08-06
 
 ### Fixed
+- The version stamp is enforced by a test, not by discipline. flowkit installs
+  as a *directory* marketplace straight from the repo — there is no separate
+  release step, so any state of `main` is potentially shipped. Drift detection
+  in `inject-context.sh` compares version *strings*, so a change under
+  `templates/` that goes out without a version bump lands in the target repo
+  under the old stamp and never prompts a re-setup. That is exactly what
+  happened to the lexer hook below. A new test asserts that `templates/` is not
+  younger than the last commit touching `plugin.json`; CI now clones with
+  `fetch-depth: 0` so the check is not silently a no-op there.
 - Message text is exempt from the pattern check again — this time via a real
   lexer instead of a regex. 0.9.0 withdrew the `sed` approach because it could
   be turned into a bypass; the hook now tokenises the command with `python3
