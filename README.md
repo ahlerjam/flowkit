@@ -107,6 +107,26 @@ directly — the install arrives as a pull request.
   last reviewed version, skips all LLM reviewer jobs and re-applies the stored
   verdict from the sticky comment. Any anomaly falls open toward a full
   review, never toward green-without-review.
+- **Open PRs do not rot behind the default branch:** an optional workflow
+  (`templates/ci/pr-autoupdate.yml.template`, installed by step 6c of
+  `/flowkit:setup`) merges the default branch into every open, non-draft,
+  same-repo PR that has fallen behind it — the job a human otherwise does by
+  hand after every merge so the required check stops hanging red or SKIPPED.
+  It is plain `git`/`gh` on a GitHub-hosted runner, not a third-party
+  container with write access to every branch. Three properties carry it:
+  (1) **it does nothing without its own push credential** (deploy key or
+  fine-grained PAT, both repo-scoped) — events from `GITHUB_TOKEN` do not
+  create workflow runs, so a branch updated with it would carry a head with no
+  checks at all and become permanently unmergeable; the token therefore keeps
+  `contents: read` and the workflow declines rather than making things worse.
+  (2) **It converges with the runner instead of locking against it:** both
+  perform the same idempotent merge, never a rebase and never a force, so a
+  rejected push is information — re-read, yield if the other actor already did
+  the work, otherwise retry exactly once. The runner's gate stations carry the
+  mirror rule. (3) **It never resolves a conflict:** `git merge --abort`, a
+  `merge-conflict` label and one comment. The append rule of the gate hangs on
+  an agent's judgement about what an accumulating file is; a shell step cannot
+  make that call and is deliberately more conservative.
 - **Worktree cleanup is deterministic:** a script
   (`scripts/cleanup-worktrees.sh`), not an LLM, decides what may be removed —
   only worktrees whose branch carries the issue number as its own segment;
@@ -118,6 +138,15 @@ Everything lives in `.claude/workflow.config.json` per repository — commands
 (test/lint/typecheck/smoke), protected areas, parallelism, budgets, models,
 effort, auto-ready policy, markers and the merge check. See
 `templates/workflow.config.json.template` and the JSON schema next to it.
+
+The one thing that does *not* live there is the push credential for the PR
+auto-update workflow: it is a repository secret, either
+`FLOWKIT_AUTOUPDATE_SSH_KEY` (private half of a deploy key with write access —
+one repo, git only, no API, no expiry, tied to no person) or
+`FLOWKIT_AUTOUPDATE_TOKEN` (fine-grained PAT, Contents: read and write, this
+repo only). Without one of them the workflow is inert by design. Its policy —
+`autoUpdatePrBranches.enabled`, `skipLabels`, `maxPrs` — is read from the
+config file at runtime, so changing it does not need another `/flowkit:setup`.
 
 ### Model tier vs. reasoning effort
 

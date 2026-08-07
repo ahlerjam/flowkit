@@ -47,6 +47,16 @@ jobs:
       - name: review-pipeline-steps (shell-logic of the pr-deep-review template)
         run: bash scripts/test-review-pipeline-steps.sh
 
+      # Runs the extracted update block against a real bare repo with real
+      # pushes (including a pre-receive hook that rejects one) — needs git's
+      # identity configured, which a fresh runner does not have.
+      - name: pr-autoupdate (shell-logic of the pr-autoupdate template)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          git config --global init.defaultBranch main
+          bash scripts/test-pr-autoupdate.sh
+
       - name: gitignore-guard
         run: bash scripts/test-gitignore-guard.sh
 
@@ -103,6 +113,29 @@ jobs:
             -e 's/{{MODEL_VERIFIER}}/claude-opus-5/g' \
             templates/ci/pr-deep-review.yml.template > /tmp/rendered-pr-deep-review.yml
           python3 -c "import yaml; yaml.safe_load(open('/tmp/rendered-pr-deep-review.yml')); print('YAML OK')"
+
+      # The shell-logic test above executes the update block in isolation; this
+      # step checks that the block still sits in a file GitHub can parse at all
+      # — a broken block scalar would make the whole workflow invisible in the
+      # target repo instead of failing loudly.
+      - name: Render + validate pr-autoupdate.yml.template as YAML
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          sed \
+            -e 's/{{RUNNER_LABELS}}/ubuntu-latest/g' \
+            -e 's/{{DEFAULT_BRANCH}}/main/g' \
+            templates/ci/pr-autoupdate.yml.template > /tmp/rendered-pr-autoupdate.yml
+          python3 - <<'PY'
+          import yaml
+          d = yaml.safe_load(open('/tmp/rendered-pr-autoupdate.yml'))
+          # `on` parses as the boolean True under YAML 1.1 — look it up by both.
+          trig = d.get('on', d.get(True))
+          assert 'push' in trig, 'the workflow no longer triggers on push'
+          assert d['permissions']['contents'] == 'read', 'GITHUB_TOKEN must stay unable to push'
+          assert not d['concurrency']['cancel-in-progress'], 'update runs must queue, not cancel each other'
+          print('YAML OK')
+          PY
 
       - name: Validate JSON files and templates
         run: |

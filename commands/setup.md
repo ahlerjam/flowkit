@@ -53,7 +53,9 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    size/S size/M size/L (Farbe ededed), needs-triage (fbca04), agent-ready (0e8a16),
    budget-exceeded (d93f0b), needs-human (d876e3), merge-blocked (0052cc, der PR
    ist grün und fertig, der Merge wurde extern angehalten — ein Mensch mergt nach
-   Freigabe von Hand), flow/quick (c2e0c6),
+   Freigabe von Hand), merge-conflict (b60205, gesetzt vom
+   pr-autoupdate-Workflow aus Schritt 6c, wenn sich der Default-Branch NICHT
+   konfliktfrei in den PR-Branch mergen lässt), flow/quick (c2e0c6),
    seed/gap-scan (c5def5, Marker für Gap-Scan-Issues — Zählbasis des
    Grooming-Wochendeckels) sowie fehlende
    type/*, priority/P0..P3, area/* aus CONFIG.areas.
@@ -218,6 +220,58 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    leer, den Typecheck-Step (`- name: Typecheck (blocking)` samt `run:`-Zeile)
    ersatzlos ENTFERNEN — ein leerer `run:` wäre ein kaputter Pflicht-Step, der
    jeden Merge blockiert. Danach `actionlint`, falls installiert.
+6c. **Proaktives PR-Branch-Update (optional, Operator fragen):** löst das
+   Problem, dass offene PRs nach jedem Merge hinter dem Default-Branch
+   zurückfallen und ihre Pflicht-Checks rot werden oder als SKIPPED hängen
+   bleiben — dann erfüllt sich der Required Check nie und Auto-Merge greift
+   nie. `${CLAUDE_PLUGIN_ROOT}/templates/ci/pr-autoupdate.yml.template` nach
+   `.github/workflows/pr-autoupdate.yml` kopieren. Platzhalter ersetzen:
+   {{DEFAULT_BRANCH}} aus CONFIG.defaultBranch, {{RUNNER_LABELS}} wie in
+   Schritt 6 (runnerLabels aus `.github/flowkit-review.json`, sonst
+   `ubuntu-latest`). **Versions-Stempel** wie in Schritt 6 in die kopierte
+   `.yml` einfügen bzw. bei Re-Setup ersetzen. Danach `actionlint`, falls
+   installiert. Die Policy (an/aus, Skip-Labels, Obergrenze) steht in
+   `.claude/workflow.config.json` unter `autoUpdatePrBranches` — der Workflow
+   liest sie zur Laufzeit selbst, ein späteres Ändern braucht KEIN erneutes
+   Setup.
+
+   **Push-Credential — der Workflow ist ohne es wirkungslos, und das ist
+   Absicht:** Ereignisse aus dem `GITHUB_TOKEN` lösen per GitHub-Design keine
+   neuen Workflow-Läufe aus. Ein damit aktualisierter Branch bekäme einen
+   neuen HEAD-Commit ganz OHNE Checks; die Branch-Protection wertet Checks am
+   HEAD-SHA, der PR wäre also dauerhaft unmergebar — schlechter als der
+   veraltete Zustand. Der Workflow verweigert deshalb den Push, solange keins
+   der beiden Secrets existiert, und schreibt einen Hinweis in die
+   Job-Summary. Prüfen: `gh secret list` — enthält es weder
+   `FLOWKIT_AUTOUPDATE_SSH_KEY` noch `FLOWKIT_AUTOUPDATE_TOKEN`, den Workflow
+   trotzdem installieren (er läuft dann leer) und dem Operator im
+   Abschlussbericht GENAU EINEN der beiden Wege anbieten, mit dieser
+   Abwägung:
+   - **Deploy-Key (enger, empfohlen):** `ssh-keygen -t ed25519 -N "" -C
+     "flowkit-autoupdate" -f <tmp>/flowkit-autoupdate`, den ÖFFENTLICHEN Teil
+     im Zielrepo unter Settings → Deploy keys mit „Allow write access"
+     hinterlegen, den privaten per `gh secret set FLOWKIT_AUTOUPDATE_SSH_KEY <
+     <tmp>/flowkit-autoupdate` setzen, danach beide Dateien löschen. Der Key
+     gilt für genau dieses eine Repo, kann nur git (keine API), hängt an
+     keinem Menschen und läuft nicht ab.
+   - **Feingranularer PAT:** Contents: read and write, NUR auf dieses Repo,
+     als `gh secret set FLOWKIT_AUTOUPDATE_TOKEN`. Bequemer, dafür an ein
+     Konto gebunden und mit Ablaufdatum.
+   Das Anlegen des Deploy-Keys bzw. des Tokens ist ein bewusster manueller
+   Einmal-Schritt: `gh api`-Mutationen sind per Hook verboten (rote Linie),
+   und ein PAT kann ohnehin nur ein Mensch erzeugen. Der Workflow selbst
+   bekommt für das `GITHUB_TOKEN` nur `contents: read` — er KANN mit ihm
+   nicht pushen, damit der oben beschriebene Fall strukturell ausgeschlossen
+   bleibt.
+
+   **Zusammenspiel mit dem Runner** (für den Bericht, nicht nachbauen): der
+   Workflow und die Gate-Wait-/Merge-Station führen dieselbe idempotente
+   Operation aus (`git merge origin/<default>`, kein Rebase, kein Force). Ein
+   abgelehnter Push ist auf beiden Seiten kein Fehler, sondern die Auskunft,
+   dass der andere schneller war. Konflikte löst der Workflow NIE auf: `git
+   merge --abort`, Label `merge-conflict` (Schritt 3) plus ein Kommentar am
+   PR. Fehlt das Label im Zielrepo, scheitert nur das `--add-label` still —
+   der Kommentar kommt trotzdem.
 7. **.gitignore-Guard (versionierbar machen, idempotent):**
    `bash ${CLAUDE_PLUGIN_ROOT}/scripts/gitignore-guard.sh .` ausführen. Das
    Script ignoriert die Laufzeit-Artefakte des Runners (`.flowkit/`,
@@ -259,12 +313,13 @@ Schritt zuerst prüfen, ob er schon erledigt ist (idempotent).
    `<pin_template>` ist älter"; Änderungen im Zielrepo als Branch + PR (Titel
    "chore: install flowkit"), NICHT direkt auf den Default-Branch.
    Vor dem Commit die von Schritt 7 freigestellten Pfade explizit stagen —
-   ZUSÄTZLICH zu allem, was Schritt 1, 6 und 6b erzeugt haben:
+   ZUSÄTZLICH zu allem, was Schritt 1, 6, 6b und 6c erzeugt haben:
    `git add .gitignore .claude/flowkit-version .claude/settings.json .claude/workflow.config.json .claude/hooks`
    plus, soweit in diesem Lauf angelegt oder geändert, `AGENTS.md`,
    `.github/workflows/pr-deep-review.yml`, `.github/flowkit-review.json`,
    `.github/scripts/flowkit_review`, `.github/actions/setup-claude-action`,
-   `.github/actions/setup-python-uv` und `.github/workflows/gates.yml`.
+   `.github/actions/setup-python-uv`, `.github/workflows/gates.yml` und
+   `.github/workflows/pr-autoupdate.yml`.
    Der Installations-PR MUSS die `.claude/`-Dateien enthalten, sonst ist die
    Installation rein lokal und in jedem Clone wirkungslos; er MUSS ebenso das
    CI-Gate enthalten, sonst installiert er eine Konfiguration ohne den Prüfpfad,
