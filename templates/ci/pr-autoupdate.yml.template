@@ -1,0 +1,290 @@
+# WHY THIS FILE EXISTS
+# Every merge into the default branch leaves the remaining open PRs behind it.
+# Their required checks then either go stale, go red, or — when a gate job is
+# filtered on an event that never comes again — stay SKIPPED forever. A
+# required check that never turns green is a PR that can never auto-merge, so
+# somebody ends up doing `git merge origin/<default> && git push` by hand, over
+# and over. This workflow does exactly that one thing, proactively.
+#
+# WHY NOT THE MARKETPLACE ACTION
+# The well-known third-party auto-update actions ship as an unverified Docker
+# image and are handed write access to every branch of the repository. That is
+# a new trust anchor in a repo that keeps a protected-areas policy. This
+# workflow is plain `git` and `gh` on a GitHub-hosted runner: no image, no
+# third-party code, every line auditable in the repo it runs in.
+#
+# WHY IT NEEDS ITS OWN PUSH CREDENTIAL (and refuses to run without one)
+# Events triggered by the repository's GITHUB_TOKEN do not create new workflow
+# runs — that is GitHub's recursion brake and it has no opt-out. A branch
+# updated with GITHUB_TOKEN would therefore get a *new head commit with no
+# checks on it at all*, which is strictly worse than a stale head: branch
+# protection evaluates checks on the head SHA, so the PR would become
+# permanently unmergeable. Hence the hard rule below: no dedicated credential,
+# no push. Provide ONE of
+#   - secrets.FLOWKIT_AUTOUPDATE_SSH_KEY — private half of a repository deploy
+#     key with write access (tightest option: scoped to this one repo, git
+#     only, no API rights, no user identity, no expiry), or
+#   - secrets.FLOWKIT_AUTOUPDATE_TOKEN — a fine-grained PAT with Contents:
+#     Read and write on this repository only.
+# The GITHUB_TOKEN keeps `contents: read` on purpose: it is structurally unable
+# to push, so the failure mode above cannot happen by accident.
+#
+# HOW IT COEXISTS WITH THE flowkit RUNNER
+# The runner's gate stations do the same update reactively, on the branch of
+# the unit they are working on (`git merge origin/<default>` in an isolated
+# worktree, no rebase, no force). Both actors therefore perform the SAME
+# idempotent operation, which is why this workflow does not try to lock them
+# out — it converges with them instead:
+#   - it never force-pushes and never rewrites history;
+#   - a rejected push means the other actor was faster: it re-fetches, and if
+#     the branch now contains the default branch it yields (the work is done),
+#     otherwise it retries exactly once and then gives up quietly;
+#   - the runner carries the mirror image of that rule, so its own rejected
+#     push is not an error either.
+# Residual race, stated rather than hidden: if a push lands in the seconds
+# between the runner's green-wait and its `gh pr merge`, the merge is refused
+# by branch protection (checks pending on the new head) and the unit ends up
+# blocked. That is a stalled PR, never an unreviewed merge — the server-side
+# gate is the backstop. Set `autoUpdatePrBranches.skipLabels` in
+# `.claude/workflow.config.json` to keep whole classes of PRs out of reach.
+#
+# WHY IT NEVER RESOLVES A CONFLICT
+# The runner resolves exactly one conflict class — a pure append conflict in an
+# accumulating file — and only because an agent can judge whether that is what
+# it is looking at. A shell step cannot. So a conflict here is always
+# `git merge --abort`, a label and one comment: visible, not guessed away, and
+# strictly more conservative than the runner.
+name: flowkit-pr-autoupdate
+
+on:
+  push:
+    branches: ["{{DEFAULT_BRANCH}}"]
+  # Manual catch-up, e.g. after adding the push credential to a repo whose PRs
+  # have been sitting behind for a while.
+  workflow_dispatch:
+
+permissions:
+  contents: read # deliberately NOT write — see the credential note above
+  pull-requests: write # labels and the conflict comment
+  issues: write # PR labels go through the issues API
+
+concurrency:
+  # One group for the whole workflow, and NOT cancel-in-progress: two merges in
+  # quick succession must not have their update runs racing each other on the
+  # same branches. GitHub keeps at most one run pending per group, so a burst
+  # of merges collapses into one follow-up run that sees the newest default
+  # branch — which is exactly the state that matters.
+  group: flowkit-pr-autoupdate
+  cancel-in-progress: false
+
+jobs:
+  autoupdate:
+    runs-on: {{RUNNER_LABELS}}
+    timeout-minutes: 20
+    steps:
+      - id: guard
+        name: Push credential present?
+        env:
+          PUSH_TOKEN: ${{ secrets.FLOWKIT_AUTOUPDATE_TOKEN }}
+          PUSH_SSH_KEY: ${{ secrets.FLOWKIT_AUTOUPDATE_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PUSH_SSH_KEY:-}" ] || [ -n "${PUSH_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### flowkit-pr-autoupdate: nothing done"
+            echo
+            echo "No push credential configured — neither \`FLOWKIT_AUTOUPDATE_SSH_KEY\` nor"
+            echo "\`FLOWKIT_AUTOUPDATE_TOKEN\` is set. Updating a branch with the repository's"
+            echo "\`GITHUB_TOKEN\` would not re-trigger any check and would leave the PR"
+            echo "unmergeable, so this workflow does nothing instead."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          fetch-depth: 0
+          # ssh-key wins when set; an empty value makes checkout fall back to
+          # `token`, which in turn falls back to GITHUB_TOKEN — read-only, so a
+          # misconfigured repo cannot push, it can only fail loudly.
+          ssh-key: ${{ secrets.FLOWKIT_AUTOUPDATE_SSH_KEY }}
+          token: ${{ secrets.FLOWKIT_AUTOUPDATE_TOKEN || github.token }}
+
+      - name: Update PR branches that are behind {{DEFAULT_BRANCH}}
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: "{{DEFAULT_BRANCH}}"
+        run: |
+          set -euo pipefail
+          # flowkit:autoupdate (Beginn)
+          # Inputs (env): REPO, DEFAULT_BRANCH, GH_TOKEN.
+          # Optional: CONFIG (default below), RUNNER_TEMP, GITHUB_STEP_SUMMARY.
+          # This block is plain bash on purpose — it carries no GitHub
+          # expression syntax at all, so flowkit's own test suite can extract
+          # and execute it verbatim instead of re-implementing it.
+          CONFIG="${CONFIG:-.claude/workflow.config.json}"
+          WORK="${RUNNER_TEMP:-$(mktemp -d)}"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          report() { printf '%s\n' "$1"; printf '%s\n' "$1" >> "$SUMMARY"; }
+
+          # Config is read from the repo, not baked in as placeholders: it is
+          # the same file the runner reads, so an operator changes the policy
+          # in one place and does not have to re-run /flowkit:setup.
+          if [ -f "$CONFIG" ] && jq -e . "$CONFIG" >/dev/null 2>&1; then
+            CFG="$(cat "$CONFIG")"
+          else
+            CFG='{}'
+            if [ -f "$CONFIG" ]; then
+              report "notice: $CONFIG is not valid JSON — falling back to defaults"
+            fi
+          fi
+          # `// ` is unusable for booleans here: in jq, `false // true` is
+          # `true`, so an explicit `enabled: false` would silently enable the
+          # workflow. Every lookup therefore tests for null explicitly.
+          jqcfg() { printf '%s' "$CFG" | jq -r "$1"; }
+          ENABLED="$(jqcfg 'if (.autoUpdatePrBranches.enabled == null) then "true" else (.autoUpdatePrBranches.enabled | tostring) end')"
+          MAX_PRS="$(jqcfg 'if (.autoUpdatePrBranches.maxPrs == null) then 20 else (.autoUpdatePrBranches.maxPrs | tonumber) end')"
+          SKIP_JSON="$(jqcfg 'if (.autoUpdatePrBranches.skipLabels == null) then ["needs-human","budget-exceeded"] else .autoUpdatePrBranches.skipLabels end | tojson')"
+
+          if [ "$ENABLED" != "true" ]; then
+            report "flowkit-pr-autoupdate: disabled via $CONFIG (autoUpdatePrBranches.enabled=false) — nothing done"
+            exit 0
+          fi
+
+          git config user.name "flowkit-autoupdate"
+          git config user.email "flowkit-autoupdate@users.noreply.github.com"
+          git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+          # Fork PRs are excluded structurally: their head lives in another
+          # repository, this credential does not reach it, and `maintainer can
+          # modify` is not something to rely on unattended. Drafts are excluded
+          # because a draft cannot produce a green required check anyway.
+          gh pr list -R "$REPO" --state open --base "$DEFAULT_BRANCH" --limit 100 \
+            --json number,headRefName,isDraft,isCrossRepository,labels > "$WORK/prs.json"
+          CANDIDATES="$(jq -r --argjson skip "$SKIP_JSON" '
+            [ .[]
+              | select(.isDraft == false)
+              | select(.isCrossRepository == false)
+              | select(([.labels[].name] - $skip) == [.labels[].name])
+            ]
+            | .[] | "\(.number)\t\(.headRefName)\t\([.labels[].name] | join(","))"' "$WORK/prs.json")"
+
+          updated=0; conflicted=0; skipped=0; yielded=0; failed=0; touched=0
+          lines=""
+          note() { lines="${lines}
+          - $1"; }
+
+          update_one() { # <pr> <branch> ; 0 ok, 2 conflict, 3 push rejected, 4 other
+            local pr="$1" branch="$2" conflict_files
+            git checkout -q -B flowkit-autoupdate-work "origin/$branch" || return 4
+            if ! git merge --no-ff -m "Merge branch '$DEFAULT_BRANCH' into $branch (flowkit auto-update)" "origin/$DEFAULT_BRANCH"; then
+              conflict_files="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
+              git merge --abort || git reset --hard -q
+              CONFLICT_FILES="$conflict_files"
+              return 2
+            fi
+            # No --force, no --force-with-lease, no lease games: a rejected
+            # push is information, not an obstacle.
+            git push origin "HEAD:refs/heads/$branch" || return 3
+            return 0
+          }
+
+          while IFS="$(printf '\t')" read -r pr branch labels; do
+            [ -n "${pr:-}" ] || continue
+            if [ "$touched" -ge "$MAX_PRS" ]; then
+              note "#$pr — skipped, maxPrs ($MAX_PRS) reached"
+              skipped=$((skipped + 1))
+              continue
+            fi
+            # Hard guard against a malformed listing: this workflow writes to
+            # PR head branches and to nothing else, least of all the branch it
+            # was triggered on.
+            if [ "$branch" = "$DEFAULT_BRANCH" ]; then
+              note "#$pr — skipped, head branch equals $DEFAULT_BRANCH (malformed listing)"
+              skipped=$((skipped + 1)); continue
+            fi
+            if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
+              note "#$pr — skipped, branch $branch not on the remote"
+              skipped=$((skipped + 1)); continue
+            fi
+            if git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" "origin/$branch"; then
+              skipped=$((skipped + 1)); continue   # already up to date
+            fi
+            if git merge-base --is-ancestor "origin/$branch" "origin/$DEFAULT_BRANCH"; then
+              note "#$pr — skipped, $branch is fully contained in $DEFAULT_BRANCH (merging would empty the PR)"
+              skipped=$((skipped + 1)); continue
+            fi
+
+            touched=$((touched + 1))
+            CONFLICT_FILES=""
+            # `f; rc=$?` would trip `set -e` on a non-zero return before rc is
+            # ever read — every call site uses the `|| rc=$?` form instead.
+            rc=0; update_one "$pr" "$branch" || rc=$?
+            if [ "$rc" = "3" ]; then
+              # Somebody else — the runner's gate station or a human — pushed
+              # first. Re-read reality before doing anything else.
+              git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
+              if git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" "origin/$branch"; then
+                note "#$pr — yielded, $branch was updated by another actor"
+                yielded=$((yielded + 1)); continue
+              fi
+              CONFLICT_FILES=""
+              rc=0; update_one "$pr" "$branch" || rc=$?
+              if [ "$rc" = "3" ]; then
+                note "#$pr — push rejected twice on $branch, left alone for the next run"
+                failed=$((failed + 1)); continue
+              fi
+            fi
+            case "$rc" in
+              0)
+                if printf '%s' ",$labels," | grep -q ',merge-conflict,'; then
+                  gh pr edit "$pr" -R "$REPO" --remove-label merge-conflict >/dev/null 2>&1 || true
+                fi
+                note "#$pr — $branch updated from $DEFAULT_BRANCH"
+                updated=$((updated + 1))
+                ;;
+              2)
+                if printf '%s' ",$labels," | grep -q ',merge-conflict,'; then
+                  note "#$pr — still conflicting ($CONFLICT_FILES), already labelled"
+                else
+                  gh pr edit "$pr" -R "$REPO" --add-label merge-conflict >/dev/null 2>&1 \
+                    || report "notice: could not set the merge-conflict label on #$pr (does the label exist? /flowkit:setup creates it)"
+                  gh pr comment "$pr" -R "$REPO" --body "$(printf '%s\n\n%s\n\n%s\n' \
+                    '<!-- flowkit-autoupdate-conflict:v1 -->' \
+                    "This branch cannot be updated from \`$DEFAULT_BRANCH\` automatically — merging it conflicts in: $CONFLICT_FILES" \
+                    'Nothing was pushed and nothing was resolved by guesswork; the merge was aborted. Resolve it on the branch and the automatic updates resume by themselves.')" >/dev/null 2>&1 || true
+                  note "#$pr — CONFLICT in $CONFLICT_FILES, aborted and labelled"
+                fi
+                conflicted=$((conflicted + 1))
+                ;;
+              *)
+                note "#$pr — could not be updated (git exit $rc)"
+                failed=$((failed + 1))
+                ;;
+            esac
+          done <<EOF
+          $CANDIDATES
+          EOF
+
+          git checkout -q --detach || true
+          git branch -D flowkit-autoupdate-work >/dev/null 2>&1 || true
+
+          # tee, not >>: the per-PR notes belong in the job log as well —
+          # a step summary is not visible from `gh run view --log`.
+          {
+            echo "### flowkit-pr-autoupdate"
+            echo
+            echo "updated: $updated · conflicts: $conflicted · yielded: $yielded · skipped: $skipped · failed: $failed"
+            if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
+          } | tee -a "$SUMMARY"
+          echo "flowkit-pr-autoupdate: updated=$updated conflicts=$conflicted yielded=$yielded skipped=$skipped failed=$failed"
+          # A conflicting or stubborn PR is a finding on that PR, not a broken
+          # default branch: this job stays green so the merge it followed does
+          # not show up red in the repo's history.
+          exit 0
+          # flowkit:autoupdate (Ende)
