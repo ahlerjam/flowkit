@@ -726,6 +726,56 @@ test('Gate-Wait: Re-Trigger ist das BEHIND-Update, nicht Draft-Toggle oder leere
     'WAIT_SCHEMA beschreibt retriggered noch als Draft-Toggle')
 })
 
+// 8c3. Zweiter Akteur auf demselben Branch (0.10.0): Das CI-Template
+//      pr-autoupdate.yml zieht offene PR-Branches nach JEDEM Push auf den
+//      Default-Branch nach — dieselbe Operation, die diese Station reaktiv
+//      fährt. Ohne die Regeln unten wäre ein verlorenes Push-Rennen ein
+//      Abbruch (needs-human), obwohl der Branch danach genau richtig steht,
+//      und ein fremdes Update sähe im "schon enthalten"-Zweig aus wie ein
+//      No-op-Trigger. Beides sind stille Fehlklassifikationen: der Lauf
+//      meldet ein Problem, wo keins ist. Getestet wird der Vertrag, den die
+//      Prompts tragen — dass beide Seiten nur mergen und NIE forcen.
+test('Gate-Wait/Merge: ein verlorenes Push-Rennen ist Information, kein Abbruch', async () => {
+  const { calls } = await runWorkflow({ units: [unit(1)], config: cfg() })
+  const p = only(calls, 'gate-wait #1').prompt
+  const gm = only(calls, 'gate-merge #1').prompt
+
+  assert.ok(/3c\. ABGELEHNTER PUSH/.test(p), 'der Gate-Wait hat keine Regel für einen abgelehnten Push — ein Rennen gegen den pr-autoupdate-Workflow endet dann als technischer Fehler')
+  assert.ok(/lehnt der Push ab: Schritt 3c/.test(p), 'Schritt 3a verweist nicht auf die Regel, die er auslöst')
+  assert.ok(/abgelehnt/.test(gm), 'die Merge-Station kennt den abgelehnten Push nicht')
+
+  // Die eine Sache, die in beiden Prompts NIE stehen darf: Gewalt. Ein
+  // --force auf dem PR-Branch überschriebe die Arbeit des anderen Akteurs
+  // (oder eines Menschen) und wäre nicht rückholbar.
+  for (const [name, text] of [['gate-wait', p], ['gate-merge', gm]]) {
+    assert.ok(/KEIN force/.test(text) || /Grund für --force/.test(text),
+      `${name} verbietet den Force-Push nicht mehr ausdrücklich`)
+    for (const m of text.matchAll(/--force[a-z-]*/g)) {
+      const before = text.slice(Math.max(0, m.index - 60), m.index)
+      assert.ok(/KEIN|kein Grund|keinen Umständen/.test(before),
+        `${name} nennt "${m[0]}" ohne Verbot davor — im Zweifel liest die Station das als Erlaubnis`)
+    }
+  }
+
+  // Nachgeben heißt: neu lesen, nicht raten. Ohne die Ancestor-Prüfung nach
+  // dem fehlgeschlagenen Push wüsste die Station nicht, ob der andere
+  // dieselbe Arbeit erledigt hat oder etwas ganz anderes gepusht wurde.
+  assert.ok((p.match(/git merge-base --is-ancestor origin\/main origin\/feat\/1-x/g) || []).length >= 2,
+    'nach dem abgelehnten Push fehlt die erneute Ancestor-Prüfung — nachgeben wäre dann geraten')
+  assert.ok(/GENAU EINEN Wiederholungsversuch/.test(p) && /GENAU EIN Wiederholungsversuch/.test(gm),
+    'ohne Deckel auf den Wiederholungsversuchen dreht das Rennen endlos')
+
+  // Fremdes Update im "schon enthalten"-Zweig: ohne den SHA-Vergleich beendet
+  // die Station den Lauf mit green:false, obwohl die Läufe gerade anlaufen.
+  assert.ok(/Weicht der SHA von dem aus Schritt 1 ab/.test(p),
+    'der "schon enthalten"-Zweig unterscheidet nicht zwischen "nichts passiert" und "ein anderer hat nachgezogen"')
+
+  // retriggered bleibt die Aussage über die EIGENE Handlung; sonst liest der
+  // Operator im Bericht einen Re-Trigger, den diese Station nie ausgeführt hat.
+  assert.ok(/zählt hier nicht mit/.test(only(calls, 'gate-wait #1').opts.schema.properties.retriggered.description),
+    'WAIT_SCHEMA sagt nicht, dass ein fremdes Update nicht als eigener Re-Trigger zählt')
+})
+
 // 8d. Der Nutzen der Felder entsteht erst in der Meldung: sie ist der einzige
 //     Draht zum Operator (Issue-Kommentar über needs-human, done[].note im
 //     Bericht). Deshalb beides prüfen, nicht nur den Report.
