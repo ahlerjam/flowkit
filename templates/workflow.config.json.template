@@ -84,6 +84,14 @@
   "progressStopAfter": 3,
   "mergeCheck": "coordinator",
   "ciInfraSignatures": [],
+  "autoUpdatePrBranches": {
+    "enabled": true,
+    "skipLabels": [
+      "needs-human",
+      "budget-exceeded"
+    ],
+    "maxPrs": 20
+  },
   "overrideLabel": "override-claude-review",
   "markers": {
     "plan": "<!-- plan:v1 -->",

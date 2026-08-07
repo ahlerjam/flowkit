@@ -237,6 +237,29 @@
       "default": [],
       "description": "zusätzliche Logsignaturen, die die Gate-Wait-Station als CI-Infrastruktur (statt Code) wertet und mit `gh run rerun --failed` beantwortet, bevor eine Fix-Runde ausgelöst wird — ein Re-Run je rotem Lauf, höchstens zwei je Station. Ergänzt die eingebauten Signaturen (operation timed out, Failed to download, error sending request for url, Could not resolve host, The runner has received a shutdown signal), ersetzt sie nie. Für repo-eigene Infrastruktur gedacht (selbstgehostete Runner, interne Registry). Leere Strings sind unzulässig — sie wären Teilstring jedes Logs und würden jeden roten Check zur Infrastruktur erklären."
     },
+    "autoUpdatePrBranches": {
+      "type": "object",
+      "description": "Steuert den CI-Workflow .github/workflows/pr-autoupdate.yml (Template templates/ci/pr-autoupdate.yml.template): nach jedem Push auf den Default-Branch merged er ihn in die offenen, nicht-Draft-PR-Branches desselben Repos, damit deren Pflicht-Checks nicht dauerhaft hinter dem Ziel-Branch zurückfallen. Ohne installierten Workflow und ohne Push-Credential (Secret FLOWKIT_AUTOUPDATE_SSH_KEY oder FLOWKIT_AUTOUPDATE_TOKEN) ist die Sektion wirkungslos — der Workflow tut dann nichts, weil ein Update mit dem GITHUB_TOKEN keinen Check auslöst und den PR unmergebar zurückließe. Der Runner selbst liest diese Sektion nicht; sie wird ausschließlich in der CI ausgewertet.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "false schaltet den installierten Workflow ab, ohne ihn zu löschen"
+        },
+        "skipLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["needs-human", "budget-exceeded"],
+          "description": "PRs mit einem dieser Labels bleiben unangetastet. Voreingestellt sind die beiden Abbruch-Signale des Runners: dort wartet eine Menschen-Entscheidung, und der Branch soll sich darunter nicht bewegen. merge-blocked steht bewusst NICHT drin — das ist der Zustand „grün und fertig, wartet auf einen Handmerge“, also genau der PR, der aktuell bleiben muss."
+        },
+        "maxPrs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 20,
+          "description": "Obergrenze der je Lauf aktualisierten PRs; jeder Push löst CI aus, das deckelt die Kosten eines einzelnen Merges in einem Repo mit vielen offenen PRs. 0 = nichts tun."
+        }
+      }
+    },
     "overrideLabel": {
       "type": "string"
     },
