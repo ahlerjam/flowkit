@@ -6,6 +6,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions 0.2.0 through 0.5.0 were reconstructed retroactively from the git history.
 
+## [0.10.0] - 2026-08-07
+
+### Added
+- Open PRs stop rotting behind the default branch. A new optional CI template
+  (`templates/ci/pr-autoupdate.yml.template`, installed as
+  `.github/workflows/pr-autoupdate.yml` by step 6c of `/flowkit:setup`) merges
+  the default branch into every open, non-draft, same-repo PR that has fallen
+  behind it, on every push to that branch. Until now this was manual labour
+  after every merge — the required check on a stale branch goes red or, when a
+  gate job is filtered on an event that does not come again, stays SKIPPED, and
+  a required check that never turns green is a PR that can never auto-merge.
+
+  The obvious route was the marketplace auto-update action. It was rejected on
+  purpose: an unverified container handed write access to every branch is a new
+  trust anchor in repos that keep a protected-areas policy. This is plain
+  `git`/`gh` on a GitHub-hosted runner, every line auditable in the repo it
+  runs in, and its shell logic is extracted verbatim by flowkit's own test
+  suite and executed against a real bare repo with real pushes (31 cases,
+  including rejected pushes via a `pre-receive` hook).
+
+  Three decisions are the substance of it:
+
+  **It refuses to work without its own push credential.** Events triggered by
+  the repository's `GITHUB_TOKEN` do not create new workflow runs — GitHub's
+  recursion brake, no opt-out. A branch updated with it would get a new head
+  commit carrying *no checks at all*, and since branch protection evaluates the
+  head SHA, the PR would be permanently unmergeable: strictly worse than being
+  stale. So the workflow declines and says so in the job summary until one of
+  `FLOWKIT_AUTOUPDATE_SSH_KEY` (deploy key with write access — one repo, git
+  only, no API rights, no expiry, tied to no person; the tighter option) or
+  `FLOWKIT_AUTOUPDATE_TOKEN` (fine-grained PAT, Contents: read and write, this
+  repo only) exists. `GITHUB_TOKEN` keeps `contents: read`, so the failure mode
+  is structurally out of reach rather than merely avoided.
+
+  **It converges with the runner instead of locking against it.** The gate
+  stations do the same update reactively on the branch of the unit they are
+  working on, and the collision window is not exotic — it is the normal path of
+  a parallel run: a merge lands, this workflow starts, the next unit's merge
+  station updates its own branch seconds later. Mutual exclusion would have
+  needed a lock across process boundaries; as a label on the PR it would take
+  that PR out of the automation for good whenever a run crashed while holding
+  it — a silent permanent defect traded against a seconds-long window. Instead:
+  both actors run the *same* idempotent operation (`git merge
+  origin/<default>`, no rebase, no force), so a rejected push is not an
+  obstacle but the information that the other one was faster. Both sides now
+  re-read, yield when the work is already done, and otherwise retry exactly
+  once. Residual race, stated rather than hidden: an update landing in the
+  seconds between the gate's green and its `gh pr merge` makes branch
+  protection refuse that merge (checks pending on the new head) and the unit
+  ends blocked — a stalled PR, never an unreviewed merge.
+
+  **It never resolves a conflict.** The gate resolves exactly one class, a pure
+  append conflict in an accumulating file, and only because an agent can judge
+  whether that is what it is looking at; a shell step cannot. So a conflict is
+  always `git merge --abort`, a `merge-conflict` label (new, created by setup)
+  and one comment naming the files — no push, no guess, and the comment is
+  written once, not on every merge into the default branch.
+
+  Policy lives in `.claude/workflow.config.json` under `autoUpdatePrBranches`
+  (`enabled`, `skipLabels`, `maxPrs`) and is read by the workflow at runtime,
+  so changing it does not need another `/flowkit:setup`. `skipLabels` defaults
+  to the runner's two abort signals (`needs-human`, `budget-exceeded`): there a
+  human decision is pending and the branch should not move underneath it.
+  `merge-blocked` is deliberately not in that list — that is the "green and
+  finished, waiting for a hand merge" state, which is exactly the PR whose
+  checks have to stay current.
+
+### Fixed
+- A lost push race no longer ends a unit. The gate-wait station treated a
+  rejected push (`non-fast-forward`) as a technical failure and sent the issue
+  to `needs-human` although the branch afterwards stood exactly right — and it
+  read a *foreign* update as a no-op re-trigger: the "already contains the
+  default branch" branch of step 3a returned `green: false` while the runs it
+  had been waiting for were starting. Step 3a now decides on the head SHA
+  against the one it read on entry, and a new step 3c handles the rejected push
+  the same way on both stations. This is not only about the new workflow: a
+  human updating a branch by hand — the very thing that triggered this work —
+  produced the same two misclassifications.
+
 ## [0.9.1] - 2026-08-06
 
 ### Fixed
